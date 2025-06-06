@@ -286,7 +286,7 @@ def get_data_from_supabase(table_name, start_date, end_date, page_size=1000):
 def main():
     st.title("Análisis de la Red Eléctrica Española")
 
-    tab1, tab2, tab3 = st.tabs(["Descripción", "Consulta de datos", "Visualización"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Descripción", "Consulta de datos", "Visualización", "Apagón"])
 
     # Tab 1: Descripción
     with tab1:
@@ -370,6 +370,8 @@ def main():
         else:
             st.info("Primero consulta los datos desde la pestaña anterior.")
 
+    with tab4:
+        st.subheader("Gráficos de interés sobre el apagón")
 
 if __name__ == "__main__":
     main()
