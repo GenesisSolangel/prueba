@@ -321,6 +321,11 @@ def main():
             "demanda", "balance", "generacion", "intercambios", "intercambios_baleares"
         ])
 
+        if st.button("Actualizar datos desde la API"):
+            with st.spinner("Actualizando datos desde la API..."):
+                get_data_for_last_x_years()
+                st.success("Datos actualizados correctamente.")
+
         with st.spinner("Consultando Supabase..."):
             df = get_data_from_supabase(table, start_date, end_date)
 
