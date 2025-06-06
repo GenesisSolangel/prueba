@@ -224,10 +224,12 @@ def get_data_for_last_x_years(num_years=3):
             print("❌ Error durante la actualización automática desde API:", e)
 
     def iniciar_programador_api():
-        schedule.every(1).minutes.do(actualizar_datos_desde_api)
+        schedule.every(1).hours.do(actualizar_datos_desde_api)
 
         while True:
+            os.write(1, b'Scheduler: tarea empezada.\n')
             schedule.run_pending()
+            os.write(1, b'Scheduler: tarea acabada, pausando...\n')
             tiempo.sleep(60)
 
     # 🧵 Lanza el hilo para ejecución en background
