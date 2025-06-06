@@ -228,6 +228,7 @@ def get_data_for_last_x_years(num_years=3):
 
         while True:
             os.write(1, b'Scheduler: tarea empezada.\n')
+            st.write("hello world")
             schedule.run_pending()
             os.write(1, b'Scheduler: tarea acabada, pausando...\n')
             tiempo.sleep(60)
