@@ -224,7 +224,7 @@ def get_data_for_last_x_years(num_years=3):
             print("❌ Error durante la actualización automática desde API:", e)
 
     def iniciar_programador_api():
-        schedule.every(1).hours.do(actualizar_datos_desde_api)
+        schedule.every(1).minutes.do(actualizar_datos_desde_api)
 
         while True:
             schedule.run_pending()
