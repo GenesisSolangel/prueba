@@ -10,6 +10,13 @@ import uuid
 import requests
 from dotenv import load_dotenv
 import os
+import json
+import folium
+from streamlit_folium import st_folium
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+st.set_page_config(page_title="Red Eléctrica", layout="centered")
 
 # Constantes de configuración de la API REE
 BASE_URL = "https://apidatos.ree.es/es/datos/"
@@ -27,13 +34,14 @@ ENDPOINTS = {
     "intercambios_baleares": ("intercambios/enlace-baleares", "day"),
 }
 
-# Configuración de credenciales de Supabase
-#SUPABASE_URL = "https://gbfxqkzjzamqlqhzvbqc.supabase.co"  # Sustituye con tu URL
-#SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdiZnhxa3pqemFtcWxxaHp2YnFjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDkwMjc3MDksImV4cCI6MjA2NDYwMzcwOX0.ju_muEo9aTGT8FWFYpP-5_uEaywdSn7xOPllt1VQtUQ"  # Sustituye con tu anon key
+# Cargar las variables de entorno desde el archivo .env
 load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+
+# ------------------------------ UTILIDADES ------------------------------
 
 # Función para consultar un endpoint, según los parámetros dados, de la API de REE
 def get_data(endpoint_name, endpoint_info, params):
@@ -74,8 +82,32 @@ def get_data(endpoint_name, endpoint_info, params):
 
     return data
 
+# Función para insertar cada DataFrame en Supabase
+def insertar_en_supabase(nombre_tabla, df):
+    df = df.copy()
 
-# Función de extracción de datos de los últimos x años, devuelve un DataFrame de Pandas
+    # Generamos IDs únicos
+    df["record_id"] = [str(uuid.uuid4()) for _ in range(len(df))]
+
+    # Convertimos fechas a string ISO
+    for col in ["datetime", "extraction_timestamp"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str)
+
+    # Reemplazamos NaN por None
+    #df = df.where(pd.notnull(df), None)
+
+    # Convertir a lista de diccionarios e insertar
+    data = df.to_dict(orient="records")
+
+    try:
+        supabase.table(nombre_tabla).insert(data).execute()
+        print(f"✅ Insertados en '{nombre_tabla}': {len(data)} filas")
+    except Exception as e:
+        print(f"❌ Error al insertar en '{nombre_tabla}': {e}")
+
+# ------------------------------ FUNCIONES DE DESCARGA ------------------------------
+# Función de extracción de datos de los últimos x años, devuelve DataFrame. Ejecutar una vez al inicio para poblar la base de datos.
 def get_data_for_last_x_years(num_years=3):
     all_dfs = []
     current_date = datetime.now()
@@ -89,12 +121,13 @@ def get_data_for_last_x_years(num_years=3):
             month_start = datetime(year, month, 1)
             if month_start > current_date:
                 continue
-
             # Calculamos el final del mes, asegurándonos de no exceder la fecha actual
             month_end = (month_start + timedelta(days=32)).replace(day=1) - timedelta(minutes=1)
             end_date_for_request = min(month_end, current_date)
 
-            # Iteramos sobre cada endpoint
+            monthly_data = []  # para acumular todos los dfs del mes
+
+            # Iteramos sobre cada endpoint y sacamos los datos
             for name, (path, granularity) in ENDPOINTS.items():
                 params = {
                     "start_date": month_start.strftime("%Y-%m-%dT%H:%M"),
@@ -104,12 +137,11 @@ def get_data_for_last_x_years(num_years=3):
                     "geo_ids": "8741"
                 }
 
-                month_data = get_data(name, (path, granularity), params)
+                data = get_data(name, (path, granularity), params)
 
-                # Y sacamos los datos
-                if month_data:
-                    df = pd.DataFrame(month_data)
-                    # Lidiamos con problemas de zona horaria en la columna "datetime"
+                if data:
+                    df = pd.DataFrame(data)
+                    #Lidiamos con problemas de zona horaria en la columna "datetime"
                     try:
                         df['datetime'] = pd.to_datetime(df['datetime'], utc=True)
                     except Exception:
@@ -120,130 +152,103 @@ def get_data_for_last_x_years(num_years=3):
                     df['month'] = df['datetime'].dt.month
                     df['day'] = df['datetime'].dt.day
                     df['hour'] = df['datetime'].dt.hour
-                    df['endpoint'] = name
                     df['extraction_timestamp'] = datetime.utcnow()
+                    df['endpoint'] = name
                     df['record_id'] = [str(uuid.uuid4()) for _ in range(len(df))]
-
                     df = df[['record_id', 'value', 'percentage', 'datetime',
                              'primary_category', 'sub_category', 'year', 'month',
                              'day', 'hour', 'endpoint', 'extraction_timestamp']]
 
-                    all_dfs.append(df)
+                    monthly_data.append(df)
+                    tiempo.sleep(1)
 
-                tiempo.sleep(1)
+            # Generamos los dataframes individuales
+            if monthly_data:
+                df_nuevo = pd.concat(monthly_data, ignore_index=True)
+                all_dfs.append(df_nuevo)
 
-    # ---------------- SUPABASE: Conexión e Inserción ---------------- #
-    from supabase import create_client, Client
-
-
-
-    # 📁 Diccionario tabla → DataFrame
-    # tablas_dfs = {
-    #    "demanda": df_demanda,
-    #    "balance": df_balance,
-    #    "generacion": df_generacion,
-    #    "intercambios": df_intercambios,
-    #    "intercambios_baleares": df_intercambios_baleares
-    # }
-
-    # para insertar cada DataFrame
-    def insertar_en_supabase(nombre_tabla, df):
-        import uuid
-
-        df = df.copy()
-
-        # Asegurar UUID únicos
-        df["record_id"] = [str(uuid.uuid4()) for _ in range(len(df))]
-
-        # Convertir fechas a string ISO
-        for col in ["datetime", "extraction_timestamp"]:
-            if col in df.columns:
-                df[col] = df[col].astype(str)
-
-        # Reemplazar NaN por None
-        df = df.where(pd.notnull(df), None)
-
-        # Convertir a lista de diccionarios e insertar
-        data = df.to_dict(orient="records")
-
-        try:
-            response = supabase.table(nombre_tabla).insert(data).execute()
-            print(f"✅ Insertados en '{nombre_tabla}': {len(data)} filas")
-        except Exception as e:
-            print(f"❌ Error al insertar en '{nombre_tabla}': {e}")
-
-    # ------------------ ACTUALIZACIÓN AUTOMÁTICA DESDE API + SUPABASE ------------------
-
-    def actualizar_datos_desde_api():
-        print(f"[{datetime.now()}] ⏳ Ejecutando extracción desde API...")
-
-        try:
-            current_date = datetime.now()
-            start_date = current_date - timedelta(days=2)  # Solo últimos 2 días para no sobrecargar
-
-            all_dfs = []
-
-            for name, (path, granularity) in ENDPOINTS.items():
-                params = {
-                    "start_date": start_date.strftime("%Y-%m-%dT%H:%M"),
-                    "end_date": current_date.strftime("%Y-%m-%dT%H:%M"),
-                    "geo_trunc": "electric_system",
-                    "geo_limit": "peninsular",
-                    "geo_ids": "8741"
+                tablas_dfs = {
+                    "demanda": df_nuevo[df_nuevo["endpoint"] == "demanda"].drop(columns=["endpoint", "sub_category"], errors='ignore'),
+                    "balance": df_nuevo[df_nuevo["endpoint"] == "balance"].drop(columns=["endpoint"], errors='ignore'),
+                    "generacion": df_nuevo[df_nuevo["endpoint"] == "generacion"].drop(columns=["endpoint", "sub_category"], errors='ignore'),
+                    "intercambios": df_nuevo[df_nuevo["endpoint"] == "intercambios"].drop(columns=["endpoint"], errors='ignore'),
+                    "intercambios_baleares": df_nuevo[df_nuevo["endpoint"] == "intercambios_baleares"].drop(columns=["endpoint", "sub_category"], errors='ignore'),
                 }
 
-                datos = get_data(name, (path, granularity), params)
+                for tabla, df_tabla in tablas_dfs.items():
+                    if not df_tabla.empty:
+                        insertar_en_supabase(tabla, df_tabla)
 
-                if datos:
-                    df = pd.DataFrame(datos)
-                    try:
-                        df['datetime'] = pd.to_datetime(df['datetime'], utc=True)
-                    except Exception:
-                        continue
+    return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
 
-                    df['year'] = df['datetime'].dt.year
-                    df['month'] = df['datetime'].dt.month
-                    df['day'] = df['datetime'].dt.day
-                    df['hour'] = df['datetime'].dt.hour
-                    df['endpoint'] = name
-                    df['extraction_timestamp'] = datetime.utcnow()
-                    df['record_id'] = [str(uuid.uuid4()) for _ in range(len(df))]
+# Función para actualizar los datos desde la API cada 24 horas
+def actualizar_datos_desde_api():
+    print(f"[{datetime.now()}] ⏳ Ejecutando extracción desde API...")
+    current_date = datetime.now()
+    start_date = current_date - timedelta(days=1)
 
-                    df = df[['record_id', 'value', 'percentage', 'datetime',
-                             'primary_category', 'sub_category', 'year', 'month',
-                             'day', 'hour', 'endpoint', 'extraction_timestamp']]
+    all_dfs = []
 
-                    insertar_en_supabase(name, df)
-                    print(f"✅ Datos de '{name}' actualizados.")
-                    tiempo.sleep(1)
-                else:
-                    print(f"⚠️ No se obtuvieron datos de '{name}'")
+    for name, (path, granularity) in ENDPOINTS.items():
+        params = {
+            "start_date": start_date.strftime("%Y-%m-%dT%H:%M"),
+            "end_date": current_date.strftime("%Y-%m-%dT%H:%M"),
+            "geo_trunc": "electric_system",
+            "geo_limit": "peninsular",
+            "geo_ids": "8741"
+        }
 
-            print("✅ Actualización completa.")
-        except Exception as e:
-            print("❌ Error durante la actualización automática desde API:", e)
+        datos = get_data(name, (path, granularity), params)
 
-    def iniciar_programador_api():
-        schedule.every(1).hours.do(actualizar_datos_desde_api)
+        if datos:
+            df = pd.DataFrame(datos)
+            try:
+                df['datetime'] = pd.to_datetime(df['datetime'], utc=True)
+            except Exception:
+                continue
 
-        while True:
-            os.write(1, b'Scheduler: tarea empezada.\n')
-            st.write("hello world")
-            schedule.run_pending()
-            os.write(1, b'Scheduler: tarea acabada, pausando...\n')
-            tiempo.sleep(60)
+            df['year'] = df['datetime'].dt.year
+            df['month'] = df['datetime'].dt.month
+            df['day'] = df['datetime'].dt.day
+            df['hour'] = df['datetime'].dt.hour
+            df['extraction_timestamp'] = datetime.utcnow()
+            df['endpoint'] = name
+            df['record_id'] = [str(uuid.uuid4()) for _ in range(len(df))]
 
-    # 🧵 Lanza el hilo para ejecución en background
-    threading.Thread(target=iniciar_programador_api, daemon=True).start()
+            df = df[['record_id', 'value', 'percentage', 'datetime',
+                     'primary_category', 'sub_category', 'year', 'month',
+                     'day', 'hour', 'endpoint', 'extraction_timestamp']]
+
+            all_dfs.append(df)
+            tiempo.sleep(1)
+        else:
+            print(f"⚠️ No se obtuvieron datos de '{name}'")
 
     if all_dfs:
-        combined_df = pd.concat(all_dfs, ignore_index=True)
-        return combined_df
-    else:
-        return pd.DataFrame()
+        df_nuevo = pd.concat(all_dfs, ignore_index=True)
 
+        tablas_dfs = {
+            "demanda": df_nuevo[df_nuevo["endpoint"] == "demanda"].drop(columns=["endpoint", "sub_category"]),
+            "balance": df_nuevo[df_nuevo["endpoint"] == "balance"].drop(columns=["endpoint"]),
+            "generacion": df_nuevo[df_nuevo["endpoint"] == "generacion"].drop(columns=["endpoint", "sub_category"]),
+            "intercambios": df_nuevo[df_nuevo["endpoint"] == "intercambios"].drop(columns=["endpoint"]),
+            "intercambios_baleares": df_nuevo[df_nuevo["endpoint"] == "intercambios_baleares"].drop(columns=["endpoint", "sub_category"]),
+        }
 
-st.set_page_config(page_title="Red Eléctrica", layout="centered")
+        for tabla, df in tablas_dfs.items():
+            if not df.empty:
+                insertar_en_supabase(tabla, df)
+
+# Programador para actualizar datos desde la API cada 24 horas
+def iniciar_programador_api():
+    schedule.every(24).hours.do(actualizar_datos_desde_api)
+    while True:
+        schedule.run_pending()
+        tiempo.sleep(60)
+
+threading.Thread(target=iniciar_programador_api, daemon=True).start()
+
+# ------------------------------ CONSULTA SUPABASE ------------------------------
 
 def get_data_from_supabase(table_name, start_date, end_date, page_size=1000):
     end_date += timedelta(days=1)
@@ -252,126 +257,436 @@ def get_data_from_supabase(table_name, start_date, end_date, page_size=1000):
 
     all_data = []
     offset = 0
-
     while True:
         response = (
-            supabase
-            .table(table_name)
+            supabase.table(table_name)
             .select("*")
             .gte("datetime", start_iso)
             .lte("datetime", end_iso)
             .range(offset, offset + page_size - 1)
             .execute()
         )
-
         data = response.data
         if not data:
             break
-
         all_data.extend(data)
         offset += page_size
-
         if len(data) < page_size:
             break
 
     if not all_data:
         return pd.DataFrame()
-
     df = pd.DataFrame(all_data)
     df["datetime"] = pd.to_datetime(df["datetime"])
     return df
 
-# ----------------------------- INTERFAZ -----------------------------
+# ------------------------------ INTERFAZ ------------------------------
 
 def main():
     st.title("Análisis de la Red Eléctrica Española")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Descripción", "Consulta de datos", "Visualización", "Apagón"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Descripción", "Consulta de datos", "Visualización", "Extras"])
 
-    # Tab 1: Descripción
-    with tab1:
-        st.subheader("¿Qué es esta app?")
-        st.markdown("""
-        Esta aplicación se conecta con la base de datos en Supabase que contiene datos históricos de la Red Eléctrica Española. 
-        Permite consultar y visualizar datos de demanda, balance, generación e intercambios mediante filtros por fechas y categorías.
-        """)
-
-    # Tab 2: Consulta de datos
-    with tab2:
+    with tab2:  # Mueve el contexto de la tab2 aquí para que `modo` se defina antes de usarse en session_state
         st.subheader("Consulta de datos")
 
-        modo = st.radio("Tipo de consulta:", ["Últimos días", "Año específico"], horizontal=True)
+        modo = st.radio("Tipo de consulta:", ["Últimos días", "Año específico", "Histórico"], horizontal=True,
+                        key="query_mode_radio")
+        st.session_state["modo_seleccionado"] = modo  # Guardar el modo en session_state
+
+        tabla = st.selectbox("Selecciona la tabla:", list(ENDPOINTS.keys()), key="query_table_select")
+
+        df = pd.DataFrame()  # Inicializamos el DataFrame para evitar errores
 
         if modo == "Últimos días":
-            dias = st.selectbox("¿Cuántos días atrás?", [7, 14, 30])
-            end_date = datetime.now(timezone.utc)
-            start_date = end_date - timedelta(days=dias)
-        else:
+            dias = st.selectbox("¿Cuántos días atrás?", [7, 14, 30], key="query_days_select")
+            end_date_query = datetime.now(timezone.utc)
+            start_date_query = end_date_query - timedelta(days=dias)
+            st.session_state["selected_year_for_viz"] = None  # Reset year if not in "Año específico" mode
+        elif modo == "Año específico":
             current_year = datetime.now().year
-            years = [current_year - i for i in range(0, 3)]  # [2025, 2024, 2023]
-            año = st.selectbox("Selecciona el año a consultar:", years)
-            if año == datetime.now().year:
-                start_date = datetime(año, 1, 1, tzinfo=timezone.utc)
-                end_date = datetime.now(timezone.utc)
-            else:
-                start_date = datetime(año, 1, 1, tzinfo=timezone.utc)
-                end_date = datetime(año, 12, 31, 23, 59, tzinfo=timezone.utc)
+            # Se usa `key` para que el selectbox mantenga su estado
+            año = st.selectbox("Selecciona el año:", [current_year - i for i in range(3)], index=0,
+                               key="query_year_select")
+            st.session_state["selected_year_for_viz"] = año  # Store the selected year
+            start_date_query = datetime(año, 1, 1, tzinfo=timezone.utc)
+            end_date_query = datetime(año, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc)
+        elif modo == "Histórico":
+            # Si quieres cargar datos históricos de muchos años, ten cuidado con el rendimiento
+            start_date_query = datetime(2022, 1, 1, 0, 0, 0, tzinfo=timezone.utc)  # Ejemplo de fecha inicial
+            end_date_query = datetime.now(timezone.utc)
+            st.session_state["selected_year_for_viz"] = None  # Reset year if not in "Año específico" mode
 
-        table = st.selectbox("Selecciona la tabla que deseas consultar:", [
-            "demanda", "balance", "generacion", "intercambios", "intercambios_baleares"
-        ])
+        with st.spinner("Consultando Supabase..."):
+            st.session_state["tabla_seleccionada_en_tab2"] = tabla
+            df = get_data_from_supabase(tabla, start_date_query, end_date_query)
 
+        # Botón de actualización de datos desde la API
         if st.button("Actualizar datos desde la API"):
-            with st.spinner("Actualizando datos desde la API..."):
+            with st.spinner("Actualizando datos desde la API (puede tardar)..."):
                 get_data_for_last_x_years()
                 st.success("Datos actualizados correctamente.")
 
-        with st.spinner("Consultando Supabase..."):
-            df = get_data_from_supabase(table, start_date, end_date)
-
+        # Mostrar resultados después de la consulta de cualquier modo
         if not df.empty:
             st.session_state["ree_data"] = df
-            st.session_state["tabla"] = table
-            st.session_state["start_date"] = start_date
-            st.session_state["end_date"] = end_date
+            st.session_state["tabla"] = tabla  # Esto es redundante si usas tabla_seleccionada_en_tab2, pero lo mantengo por seguridad
             st.write(f"Datos recuperados: {len(df)} filas")
             st.write("Último dato:", df['datetime'].max())
             st.success("Datos cargados correctamente desde Supabase.")
         else:
             st.warning("No se encontraron datos para ese período.")
 
-    # Tab 3: Visualización
+    with tab1:  # Reordeno esto para que la tab2 se cargue primero y defina el estado
+        st.subheader("¿Qué es esta app?")
+        st.markdown("""
+        Esta aplicación se conecta con Supabase para consultar y visualizar datos de la Red Eléctrica Española
+        como demanda, generación, intercambios y balance eléctrico.
+        """)
+
     with tab3:
         st.subheader("Visualización")
-
-        if "ree_data" in st.session_state:
+        if "ree_data" in st.session_state and not st.session_state["ree_data"].empty:
+            # Recuperamos el DataFrame principal de la sesión para el primer gráfico
             df = st.session_state["ree_data"]
+            tabla = st.session_state["tabla_seleccionada_en_tab2"]  # Usamos la tabla seleccionada en tab2
+            modo_actual = st.session_state.get("modo_seleccionado", "Últimos días")  # Obtener el modo
 
-            if table == "demanda":
-                fig = px.area(df, x="datetime", y="value", title="Demanda eléctrica", labels={"value": "Demanda (MW)"})
-            elif table == "balance":
-                fig = px.bar(df, x="datetime", y="value", color="primary_category", barmode="group",
-                             title="Balance eléctrico")
-            elif table == "generacion":
+            if tabla == "demanda":
+                fig = px.area(df, x="datetime", y="value", title="Demanda Eléctrica", labels={"value": "MW"})
+                st.plotly_chart(fig, use_container_width=True)
+
+                # --- Nuevo gráfico: Histograma de demanda con outliers para año específico ---
+                if modo_actual == "Año específico":
+                    año_seleccionado = st.session_state.get("selected_year_for_viz")
+                    if año_seleccionado is None:
+                        st.warning(
+                            "Por favor, selecciona un año en la pestaña 'Consulta de datos' para ver el histograma de demanda.")
+                    else:
+                        st.subheader(f"Distribución de Demanda y Valores Atípicos para el año {año_seleccionado}")
+
+                        # Filtra el DataFrame para el año seleccionado (df ya debe estar filtrado por el año, pero esto es por seguridad)
+                        df_año = df[df['year'] == año_seleccionado].copy()
+
+                        if not df_año.empty:
+                            # Calcular Q1, Q3 y el IQR para la columna 'value' (demanda)
+                            Q1 = df_año['value'].quantile(0.25)
+                            Q3 = df_año['value'].quantile(0.75)
+                            IQR = Q3 - Q1
+
+                            # Calcular los límites de Tukey's Fence
+                            lower_bound = Q1 - 1.5 * IQR
+                            upper_bound = Q3 + 1.5 * IQR
+
+                            # Identificar valores atípicos
+                            df_año['is_outlier'] = 'Normal'
+                            df_año.loc[df_año['value'] < lower_bound, 'is_outlier'] = 'Atípico (bajo)'
+                            df_año.loc[df_año['value'] > upper_bound, 'is_outlier'] = 'Atípico (alto)'
+
+                            # Crear el histograma
+                            fig_hist_outliers = px.histogram(
+                                df_año,
+                                x="value",
+                                color="is_outlier",
+                                title=f"Distribución Horaria de Demanda para {año_seleccionado}",
+                                labels={"value": "Demanda (MW)", "is_outlier": "Tipo de Valor"},
+                                category_orders={"is_outlier": ["Atípico (bajo)", "Normal", "Atípico (alto)"]},
+                                color_discrete_map={'Normal': 'skyblue', 'Atípico (bajo)': 'orange',
+                                                    'Atípico (alto)': 'red'},
+                                nbins=50  # Ajusta el número de bins según la granularidad deseada
+                            )
+                            fig_hist_outliers.update_layout(bargap=0.1)  # Espacio entre barras
+                            st.plotly_chart(fig_hist_outliers, use_container_width=True)
+
+                            # Mostrar información sobre outliers
+                            num_outliers_low = (df_año['is_outlier'] == 'Atípico (bajo)').sum()
+                            num_outliers_high = (df_año['is_outlier'] == 'Atípico (alto)').sum()
+
+                            if num_outliers_low > 0 or num_outliers_high > 0:
+                                st.warning(
+                                    f"Se han identificado {num_outliers_low} valores atípicos por debajo y {num_outliers_high} por encima (método IQR).")
+                                st.info(f"Rango normal de demanda (IQR): {lower_bound:.2f} MW - {upper_bound:.2f} MW")
+                            else:
+                                st.info(
+                                    "No se han identificado valores atípicos de demanda significativos (método IQR).")
+                        else:
+                            st.warning(
+                                f"No hay datos de demanda para el año {año_seleccionado} para generar el histograma.")
+
+                # --- Condición para mostrar la comparativa de años (mantenida de antes) ---
+                if modo_actual == "Histórico":
+                    st.subheader("Comparativa de Demanda entre años")
+
+                    # Definir los dos años específicos para la comparación: el año pasado y el anterior
+                    current_year = datetime.now().year
+
+                    # Los años que queremos comparar: el año anterior al actual y el año anterior a ese
+                    target_years_for_comparison = [current_year - 2, current_year - 1]
+
+                    # Obtener todos los años disponibles en el DataFrame del modo histórico
+                    all_available_years_in_df = sorted(list(df['year'].unique()))
+
+                    # Filtrar solo los años que queremos comparar y que realmente están disponibles en el df
+                    years_for_comparison = [
+                        year for year in target_years_for_comparison
+                        if year in all_available_years_in_df
+                    ]
+
+                    if len(years_for_comparison) == 2:
+                        # Asegurarse de que están en el orden deseado (ej. [2023, 2024])
+                        years_for_comparison.sort()
+                    elif len(years_for_comparison) == 1:
+                        st.info(
+                            f"Solo se encontró un año de los deseados ({years_for_comparison[0]}) en modo histórico para la comparación. Se necesitan ambos años ({target_years_for_comparison[0]} y {target_years_for_comparison[1]}).")
+                        years_for_comparison = []  # Vaciar para no intentar graficar
+                    else:  # len(years_for_comparison) == 0
+                        st.info(
+                            f"No se encontraron datos para los años {target_years_for_comparison[0]} y {target_years_for_comparison[1]} en modo histórico para la comparación.")
+                        years_for_comparison = []  # Vaciar para no intentar graficar
+
+                    if years_for_comparison:  # Solo procede si tenemos al menos dos años para comparar
+                        df_comparison_demanda = df.copy()  # Usamos el df ya cargado en modo histórico
+
+                        # Nos aseguramos de que solo tengamos los años que queremos comparar
+                        df_filtered_comparison = df_comparison_demanda[
+                            df_comparison_demanda['year'].isin(years_for_comparison)].copy()
+
+                        # Convertimos la columna 'datetime' a una fecha sin el año, para comparar día a día
+                        # Esta 'sort_key' se usa para el gráfico horario
+                        df_filtered_comparison['sort_key'] = df_filtered_comparison['datetime'].apply(
+                            lambda dt: dt.replace(year=2000)  # Usar un año base para ordenar correctamente
+                        )
+                        df_filtered_comparison = df_filtered_comparison.sort_values('sort_key')
+
+                        # --- Gráfico de Demanda Horaria General Comparativa ---
+                        fig_comp_hourly = px.line(
+                            df_filtered_comparison,
+                            x="sort_key",  # Usamos la 'sort_key' que es datetime
+                            y="value",
+                            color="year",
+                            title="Demanda Horaria - Comparativa",
+                            labels={"sort_key": "Mes y Día", "value": "Demanda (MW)", "year": "Año"},
+                            hover_data={"year": True, "datetime": "|%Y-%m-%d %H:%M"}
+                        )
+                        fig_comp_hourly.update_xaxes(tickformat="%b %d")  # Formato para mostrar Mes y Día en el eje X
+                        st.plotly_chart(fig_comp_hourly, use_container_width=True)
+
+                        # --- Gráficos de Comparación de Métricas Diarias (Media, Mediana, Mínima, Máxima) ---
+                        # Agrupar por 'year' y 'month-day' para obtener las métricas diarias para cada año
+                        metrics_comp = df_filtered_comparison.groupby(
+                            ['year', df_filtered_comparison['datetime'].dt.strftime('%m-%d')])['value'].agg(
+                            ['mean', 'median', 'min', 'max']).reset_index()
+                        metrics_comp.columns = ['year', 'month_day', 'mean', 'median', 'min', 'max']
+
+                        # La corrección para el ValueError: day is out of range for month está aquí
+                        metrics_comp['sort_key'] = pd.to_datetime('2000-' + metrics_comp['month_day'],
+                                                                  format='%Y-%m-%d')
+                        metrics_comp = metrics_comp.sort_values('sort_key')
+
+                        metric_names = {
+                            'mean': 'Media diaria de demanda',
+                            'median': 'Mediana diaria de demanda',
+                            'min': 'Mínima diaria de demanda',
+                            'max': 'Máxima diaria de demanda',
+                        }
+
+                        for metric in ['mean', 'median', 'min', 'max']:
+                            fig = px.line(
+                                metrics_comp,
+                                x="sort_key",  # <--- CAMBIO CLAVE: Usar 'sort_key' (tipo datetime) para el eje X
+                                y=metric,
+                                color="year",
+                                title=metric_names[metric],
+                                labels={"sort_key": "Fecha (Mes-Día)", metric: "Demanda (MW)", "year": "Año"},
+                                # <--- CAMBIO EN ETIQUETA
+                            )
+                            fig.update_xaxes(tickformat="%b %d")  # Formato para mostrar solo Mes y Día
+                            # Si las líneas siguen entrecortadas, considera añadir `connectgaps=True`
+                            # fig.update_traces(connectgaps=True)
+                            st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.warning(f"No hay suficientes datos de Demanda disponibles para la comparación.")
+
+                    # --- Gráfico de Identificación de años outliers (mantenida de antes) ---
+                    st.subheader("Identificación de Años Outliers (Demanda Anual Total)")
+
+                    # Asegurarse de que el df tiene la columna 'year'
+                    if 'year' not in df.columns:
+                        df['year'] = df['datetime'].dt.year
+
+                    # Agrupar por año para obtener la demanda total anual
+                    df_annual_summary = df.groupby('year')['value'].sum().reset_index()
+                    df_annual_summary.rename(columns={'value': 'total_demand_MW'}, inplace=True)
+
+                    if not df_annual_summary.empty and len(df_annual_summary) > 1:
+                        # Calcular Q1, Q3 y el IQR
+                        Q1 = df_annual_summary['total_demand_MW'].quantile(0.25)
+                        Q3 = df_annual_summary['total_demand_MW'].quantile(0.75)
+                        IQR = Q3 - Q1
+
+                        # Calcular los límites para los outliers
+                        lower_bound = Q1 - 1.5 * IQR
+                        upper_bound = Q3 + 1.5 * IQR
+
+                        # Identificar los años que son outliers
+                        df_annual_summary['is_outlier'] = (
+                                (df_annual_summary['total_demand_MW'] < lower_bound) |
+                                (df_annual_summary['total_demand_MW'] > upper_bound)
+                        )
+
+                        # Crear el gráfico de barras
+                        fig_outliers = px.bar(
+                            df_annual_summary,
+                            x='year',
+                            y='total_demand_MW',
+                            color='is_outlier',  # Colorear las barras si son outliers
+                            title='Demanda Total Anual y Años Outlier',
+                            labels={'total_demand_MW': 'Demanda Total Anual (MW)', 'year': 'Año',
+                                    'is_outlier': 'Es Outlier'},
+                            color_discrete_map={False: 'skyblue', True: 'red'}  # Definir colores
+                        )
+
+                        st.plotly_chart(fig_outliers, use_container_width=True)
+
+                        # Mostrar los años identificados como outliers
+                        outlier_years = df_annual_summary[df_annual_summary['is_outlier']]['year'].tolist()
+                        if outlier_years:
+                            st.warning(
+                                f"Se han identificado los siguientes años como outliers: {', '.join(map(str, outlier_years))}")
+                        else:
+                            st.info("No se han identificado años outliers significativos (según el método IQR).")
+                    elif not df_annual_summary.empty and len(df_annual_summary) <= 1:
+                        st.info("Se necesitan al menos 2 años de datos para calcular outliers de demanda anual.")
+                    else:
+                        st.warning("No hay datos anuales disponibles para calcular outliers.")
+                # El siguiente 'else' se aplica si modo_actual NO es "Histórico"
+                elif modo_actual != "Histórico" and modo_actual != "Año específico":
+                    st.info(
+                        "Selecciona el modo 'Histórico' para ver la comparativa de años y la identificación de outliers anuales, o 'Año específico' para el histograma de demanda con outliers.")
+
+            elif tabla == "balance":
+                fig = px.bar(df, x="datetime", y="value", color="primary_category", barmode="group", title="Balance Eléctrico")
+                st.plotly_chart(fig, use_container_width=True)
+            elif tabla == "generacion":
                 fig = px.line(df, x="datetime", y="value", color="primary_category", title="Generación")
-            elif table == "intercambios":
-                fig = px.line(df, x="datetime", y="value", color="sub_category", title="Intercambios por frontera")
-            elif table == "intercambios_baleares":
-                fig = px.line(df, x="datetime", y="value", title="Intercambios con Baleares")
+                st.plotly_chart(fig, use_container_width=True)
+            elif tabla == "intercambios":
+                st.subheader("Mapa Coroplético de Intercambios Eléctricos")
+
+                # Agrupamos y renombramos columnas
+                df_map = df.groupby("primary_category")["value"].sum().reset_index()
+                df_map.columns = ["pais_original", "Total"]
+
+                # Mapeo de nombres a inglés (para coincidir con el GeoJSON)
+                nombre_map = {
+                    "francia": "France",
+                    "portugal": "Portugal",
+                    "andorra": "Andorra",
+                    "marruecos": "Morocco"
+                }
+                df_map["Country"] = df_map["pais_original"].map(nombre_map)
+
+                df_map = df_map.dropna(subset=["Country"])
+
+                # Cargar el archivo GeoJSON
+                with open("world_countries_with_andorra.json", "r", encoding="utf-8") as f:
+                    world_geo = json.load(f)
+
+                # Crear el mapa
+                world_map = folium.Map(location=[40, 20], zoom_start=4)
+
+                folium.Choropleth(
+                    geo_data=world_geo,
+                    data=df_map,
+                    columns=["Country", "Total"],
+                    key_on="feature.properties.name",
+                    fill_color="RdBu",
+                    fill_opacity=0.7,
+                    line_opacity=0.2,
+                    legend_name="Saldo neto de energía (MWh)"
+                ).add_to(world_map)
+
+                # Mostrar en Streamlit
+                st_folium(world_map, width=1285)
+
+            elif tabla == "intercambios_baleares":
+                # Filtramos las dos categorías
+                df_ib = df[df['primary_category'].isin(['Entradas', 'Salidas'])].copy()
+
+                # Agregamos por fecha para evitar múltiples por hora si fuera el caso
+                df_ib_grouped = df_ib.groupby(['datetime', 'primary_category'])['value'].sum().reset_index()
+
+                df_ib_grouped['value'] = df_ib_grouped['value'].abs()
+
+                fig = px.area(
+                    df_ib_grouped,
+                    x="datetime",
+                    y="value",
+                    color="primary_category",
+                    labels={"value": "Energía (MWh)", "datetime": "Fecha"},
+                    title="Intercambios con Baleares - Área Apilada (Magnitud)"
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
             else:
-                fig = px.line(df, x="datetime", y="value", title="Visualización general")
-
-            st.plotly_chart(fig, use_container_width=True)
-
+                fig = px.line(df, x="datetime", y="value", title="Visualización")
+                st.plotly_chart(fig, use_container_width=True)
 
 
             with st.expander("Ver datos en tabla"):
                 st.dataframe(df, use_container_width=True)
         else:
-            st.info("Primero consulta los datos desde la pestaña anterior.")
+            st.info("Consulta primero los datos desde la pestaña anterior.")
 
     with tab4:
-        st.subheader("Gráficos de interés sobre el apagón")
+        if tabla == "demanda":
+
+            # --- HEATMAP ---
+            df_heatmap = df.copy()
+            df_heatmap['weekday'] = df_heatmap['datetime'].dt.day_name()
+            df_heatmap['hour'] = df_heatmap['datetime'].dt.hour
+
+            days_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+            heatmap_data = (
+                df_heatmap.groupby(['weekday', 'hour'])['value']
+                .mean()
+                .reset_index()
+                .pivot(index='weekday', columns='hour', values='value')
+                .reindex(days_order)
+            )
+
+            fig1 = px.imshow(
+                heatmap_data,
+                labels=dict(x="Hora del día", y="Día de la semana", color="Demanda promedio (MW)"),
+                x=heatmap_data.columns,
+                y=heatmap_data.index,
+                color_continuous_scale="YlGnBu",
+                aspect="auto",
+            )
+            fig1.update_layout(title="Demanda promedio por día y hora")
+
+
+            st.plotly_chart(fig1, use_container_width=True)
+
+            # --- BOXPLOT ---
+            df_box = df.copy()
+
+            df_box["month"] = df_box["datetime"].dt.month
+
+            fig2 = px.box(
+                df_box,
+                x="month",
+                y="value",
+                title="Distribución de Demanda por mes",
+                labels={"value": "Demanda (MWh)", "hour": "Hora del Día"}
+            )
+
+
+            st.plotly_chart(fig2, use_container_width=True)
+
+        else:
+            st.markdown("Nada que ver... de momento 😴")
 
 if __name__ == "__main__":
     main()
