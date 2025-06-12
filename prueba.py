@@ -244,6 +244,245 @@ def iniciar_programador_api():
         schedule.run_pending()
         tiempo.sleep(60)
 
+#threading.Thread(target=iniciar_programador_api, daemon=True).start()
+
+# ------------------------------ CONSULTA SUPABASE ------------------------------
+
+def get_data_from_supabase(table_name, start_date, end_date, page_size=1000):
+    end_date += timedelta(days=1)
+    start_iso = start_date.isoformat()
+    end_iso = end_date.isoformat()
+
+    all_data = []
+    offset = 0
+    while True:
+        response = (
+            supabase.table(table_name)
+            .select("*")
+            .gte("datetime", start_iso)
+            .lte("datetime", end_iso)
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        data = response.data
+        if not data:
+            break
+        all_data.extend(data)
+        offset += page_size
+        if len(data) < page_size:
+            break
+
+    if not all_data:
+        return pd.DataFrame()
+    df = pd.DataFrame(all_data)
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    return df
+
+# ------------------------------ UTILIDADES ------------------------------
+
+# Función para consultar un endpoint, según los parámetros dados, de la API de REE
+def get_data(endpoint_name, endpoint_info, params):
+    path, time_trunc = endpoint_info
+    params["time_trunc"] = time_trunc
+    url = BASE_URL + path
+
+    try:
+        response = requests.get(url, headers=HEADERS, params=params)
+        # Si la búsqueda no fue bien, se devuelve una lista vacía
+        if response.status_code != 200:
+            return []
+        response_data = response.json()
+    except Exception:
+        return []
+
+    data = []
+
+    # Verificamos si el item tiene "content" y asumimos que es una estructura compleja
+    for item in response_data.get("included", []):
+        attrs = item.get("attributes", {})
+        category = attrs.get("title")
+
+        if "content" in attrs:
+            for sub in attrs["content"]:
+                sub_attrs = sub.get("attributes", {})
+                sub_cat = sub_attrs.get("title")
+                for entry in sub_attrs.get("values", []):
+                    entry["primary_category"] = category
+                    entry["sub_category"] = sub_cat
+                    data.append(entry)
+        else:
+            # Procesamos las estructuras más simples (demanda, generacion, intercambios_baleares), asumiendo que no hay subcategorías
+            for entry in attrs.get("values", []):
+                entry["primary_category"] = category
+                entry["sub_category"] = None
+                data.append(entry)
+
+    return data
+
+# Función para insertar cada DataFrame en Supabase
+def insertar_en_supabase(nombre_tabla, df):
+    df = df.copy()
+
+    # Generamos IDs únicos
+    df["record_id"] = [str(uuid.uuid4()) for _ in range(len(df))]
+
+    # Convertimos fechas a string ISO
+    for col in ["datetime", "extraction_timestamp"]:
+        if col in df.columns:
+            df[col] = df[col].astype(str)
+
+    # Reemplazamos NaN por None
+    #df = df.where(pd.notnull(df), None)
+
+    # Convertir a lista de diccionarios e insertar
+    data = df.to_dict(orient="records")
+
+    try:
+        supabase.table(nombre_tabla).insert(data).execute()
+        print(f"✅ Insertados en '{nombre_tabla}': {len(data)} filas")
+    except Exception as e:
+        print(f"❌ Error al insertar en '{nombre_tabla}': {e}")
+
+# ------------------------------ FUNCIONES DE DESCARGA ------------------------------
+# Función de extracción de datos de los últimos x años, devuelve DataFrame. Ejecutar una vez al inicio para poblar la base de datos.
+def get_data_for_last_x_years(num_years=3):
+    all_dfs = []
+    current_date = datetime.now()
+    # Calculamos el año de inicio a partir del año actual
+    start_year_limit = current_date.year - num_years
+
+    # Iteramos sobre cada año y mes
+    for year in range(start_year_limit, current_date.year + 1):
+        for month in range(1, 13):
+            # Si el mes es mayor al mes actual y el año es el actual, lo saltamos
+            month_start = datetime(year, month, 1)
+            if month_start > current_date:
+                continue
+            # Calculamos el final del mes, asegurándonos de no exceder la fecha actual
+            month_end = (month_start + timedelta(days=32)).replace(day=1) - timedelta(minutes=1)
+            end_date_for_request = min(month_end, current_date)
+
+            monthly_data = []  # para acumular todos los dfs del mes
+
+            # Iteramos sobre cada endpoint y sacamos los datos
+            for name, (path, granularity) in ENDPOINTS.items():
+                params = {
+                    "start_date": month_start.strftime("%Y-%m-%dT%H:%M"),
+                    "end_date": end_date_for_request.strftime("%Y-%m-%dT%H:%M"),
+                    "geo_trunc": "electric_system",
+                    "geo_limit": "peninsular",
+                    "geo_ids": "8741"
+                }
+
+                data = get_data(name, (path, granularity), params)
+
+                if data:
+                    df = pd.DataFrame(data)
+                    #Lidiamos con problemas de zona horaria en la columna "datetime"
+                    try:
+                        df['datetime'] = pd.to_datetime(df['datetime'], utc=True)
+                    except Exception:
+                        continue
+
+                    # Obtenemos nuevas columnas y las reordenamos
+                    df['year'] = df['datetime'].dt.year
+                    df['month'] = df['datetime'].dt.month
+                    df['day'] = df['datetime'].dt.day
+                    df['hour'] = df['datetime'].dt.hour
+                    df['extraction_timestamp'] = datetime.utcnow()
+                    df['endpoint'] = name
+                    df['record_id'] = [str(uuid.uuid4()) for _ in range(len(df))]
+                    df = df[['record_id', 'value', 'percentage', 'datetime',
+                             'primary_category', 'sub_category', 'year', 'month',
+                             'day', 'hour', 'endpoint', 'extraction_timestamp']]
+
+                    monthly_data.append(df)
+                    tiempo.sleep(1)
+
+            # Generamos los dataframes individuales
+            if monthly_data:
+                df_nuevo = pd.concat(monthly_data, ignore_index=True)
+                all_dfs.append(df_nuevo)
+
+                tablas_dfs = {
+                    "demanda": df_nuevo[df_nuevo["endpoint"] == "demanda"].drop(columns=["endpoint", "sub_category"], errors='ignore'),
+                    "balance": df_nuevo[df_nuevo["endpoint"] == "balance"].drop(columns=["endpoint"], errors='ignore'),
+                    "generacion": df_nuevo[df_nuevo["endpoint"] == "generacion"].drop(columns=["endpoint", "sub_category"], errors='ignore'),
+                    "intercambios": df_nuevo[df_nuevo["endpoint"] == "intercambios"].drop(columns=["endpoint"], errors='ignore'),
+                    "intercambios_baleares": df_nuevo[df_nuevo["endpoint"] == "intercambios_baleares"].drop(columns=["endpoint", "sub_category"], errors='ignore'),
+                }
+
+                for tabla, df_tabla in tablas_dfs.items():
+                    if not df_tabla.empty:
+                        insertar_en_supabase(tabla, df_tabla)
+
+    return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
+
+# Función para actualizar los datos desde la API cada 24 horas
+def actualizar_datos_desde_api():
+    print(f"[{datetime.now()}] ⏳ Ejecutando extracción desde API...")
+    current_date = datetime.now()
+    start_date = current_date - timedelta(days=1)
+
+    all_dfs = []
+
+    for name, (path, granularity) in ENDPOINTS.items():
+        params = {
+            "start_date": start_date.strftime("%Y-%m-%dT%H:%M"),
+            "end_date": current_date.strftime("%Y-%m-%dT%H:%M"),
+            "geo_trunc": "electric_system",
+            "geo_limit": "peninsular",
+            "geo_ids": "8741"
+        }
+
+        datos = get_data(name, (path, granularity), params)
+
+        if datos:
+            df = pd.DataFrame(datos)
+            try:
+                df['datetime'] = pd.to_datetime(df['datetime'], utc=True)
+            except Exception:
+                continue
+
+            df['year'] = df['datetime'].dt.year
+            df['month'] = df['datetime'].dt.month
+            df['day'] = df['datetime'].dt.day
+            df['hour'] = df['datetime'].dt.hour
+            df['extraction_timestamp'] = datetime.utcnow()
+            df['endpoint'] = name
+            df['record_id'] = [str(uuid.uuid4()) for _ in range(len(df))]
+
+            df = df[['record_id', 'value', 'percentage', 'datetime',
+                     'primary_category', 'sub_category', 'year', 'month',
+                     'day', 'hour', 'endpoint', 'extraction_timestamp']]
+
+            all_dfs.append(df)
+            tiempo.sleep(1)
+        else:
+            print(f"⚠️ No se obtuvieron datos de '{name}'")
+
+    if all_dfs:
+        df_nuevo = pd.concat(all_dfs, ignore_index=True)
+
+        tablas_dfs = {
+            "demanda": df_nuevo[df_nuevo["endpoint"] == "demanda"].drop(columns=["endpoint", "sub_category"]),
+            "balance": df_nuevo[df_nuevo["endpoint"] == "balance"].drop(columns=["endpoint"]),
+            "generacion": df_nuevo[df_nuevo["endpoint"] == "generacion"].drop(columns=["endpoint", "sub_category"]),
+            "intercambios": df_nuevo[df_nuevo["endpoint"] == "intercambios"].drop(columns=["endpoint"]),
+            "intercambios_baleares": df_nuevo[df_nuevo["endpoint"] == "intercambios_baleares"].drop(columns=["endpoint", "sub_category"]),
+        }
+
+        for tabla, df in tablas_dfs.items():
+            if not df.empty:
+                insertar_en_supabase(tabla, df)
+
+# Programador para actualizar datos desde la API cada 24 horas
+def iniciar_programador_api():
+    schedule.every(24).hours.do(actualizar_datos_desde_api)
+    while True:
+        schedule.run_pending()
+        tiempo.sleep(60)
+
 threading.Thread(target=iniciar_programador_api, daemon=True).start()
 
 # ------------------------------ CONSULTA SUPABASE ------------------------------
@@ -332,8 +571,15 @@ def main():
     with tab1:  # Reordeno esto para que la tab2 se cargue primero y defina el estado
         st.subheader("¿Qué es esta app?")
         st.markdown("""
-        Esta aplicación se conecta con Supabase para consultar y visualizar datos de la Red Eléctrica Española
-        como demanda, generación, intercambios y balance eléctrico.
+        Este proyecto explora los datos públicos de la **Red Eléctrica de España (REE)** a través de su API.
+        Se analizan aspectos como:
+
+        - La **demanda eléctrica** por hora.
+        - El **balance eléctrico** por día.
+        - La **generación** por mes.
+        - Los **intercambios programados** con otros países.
+
+        Estos datos permiten visualizar la evolución energética de España y generar análisis útiles para planificación y sostenibilidad.
         """)
 
     with tab3:
@@ -496,11 +742,22 @@ def main():
                             # Si las líneas siguen entrecortadas, considera añadir `connectgaps=True`
                             # fig.update_traces(connectgaps=True)
                             st.plotly_chart(fig, use_container_width=True)
+
+
                     else:
                         st.warning(f"No hay suficientes datos de Demanda disponibles para la comparación.")
 
                     # --- Gráfico de Identificación de años outliers (mantenida de antes) ---
                     st.subheader("Identificación de Años Outliers (Demanda Anual Total)")
+
+                    st.markdown(
+                        "**Este gráfico muestra los años identificados como outliers en la demanda total anual.**\n\n"
+                        "En este caso, solo se detecta como outlier el año **2025**, lo cual es esperable ya que todavía no ha finalizado "
+                        "y su demanda acumulada es significativamente menor.\n\n"
+                        "Los años **2022, 2023 y 2024** presentan una demanda anual muy similar, en torno a los **700 MW**, por lo que "
+                        "no se consideran outliers según el criterio del rango intercuartílico (IQR)."
+                    )
+
 
                     # Asegurarse de que el df tiene la columna 'year'
                     if 'year' not in df.columns:
@@ -559,6 +816,13 @@ def main():
             elif tabla == "balance":
                 fig = px.bar(df, x="datetime", y="value", color="primary_category", barmode="group", title="Balance Eléctrico")
                 st.plotly_chart(fig, use_container_width=True)
+                st.markdown(
+                    "**Balance eléctrico diario por categoría**\n\n"
+                    "Este gráfico representa el balance energético entre las distintas fuentes y usos diarios. Cada barra agrupa los componentes "
+                    "principales del sistema: generación, consumo, pérdidas y exportaciones.\n\n"
+                    "Es útil para entender si hay superávit, déficit o equilibrio en la red cada día, y cómo se distribuye el uso de energía entre sectores."
+                )
+            
             elif tabla == "generacion":
                 df['date'] = df['datetime'].dt.date  # Para reducir a nivel diario (si no lo tienes)
 
@@ -572,12 +836,31 @@ def main():
                     title="Generación diaria agregada por tipo"
                 )
                 st.plotly_chart(fig, use_container_width=True)
+                st.markdown(
+                    "**Generación diaria agregada por tipo**\n\n"
+                    "Se visualiza la evolución de la generación eléctrica por fuente: renovables (eólica, solar, hidroeléctrica) y no renovables "
+                    "(gas, nuclear, etc.).\n\n"
+                    "Esta gráfica permite observar patrones como aumentos de producción renovable en días soleados o ventosos, así como la estabilidad "
+                    "de tecnologías de base como la nuclear. Es clave para analizar la transición energética."
+                )
+
+            
             elif tabla == "intercambios":
                 st.subheader("Mapa Coroplético de Intercambios Eléctricos")
 
-                # Agrupamos y renombramos columnas
+                st.markdown(
+                    "**Intercambios eléctricos internacionales**\n\n"
+                    "Este mapa muestra el **saldo neto de energía** (exportaciones menos importaciones) entre España y los países vecinos: "
+                    "**Francia, Portugal, Marruecos y Andorra**.\n\n"
+                    "Los valores positivos indican que **España exporta más energía de la que importa**, mientras que los negativos reflejan lo contrario.\n\n"
+                    "Este análisis es clave para comprender el papel de España como nodo energético regional, identificar dependencias o excedentes, "
+                    "y analizar cómo varían los flujos en situaciones especiales como picos de demanda o apagones."
+                )
+
+                    # Agrupamos y renombramos columnas
                 df_map = df.groupby("primary_category")["value"].sum().reset_index()
                 df_map.columns = ["pais_original", "Total"]
+
 
                 # Mapeo de nombres a inglés (para coincidir con el GeoJSON)
                 nombre_map = {
@@ -608,6 +891,19 @@ def main():
                     legend_name="Saldo neto de energía (MWh)"
                 ).add_to(world_map)
 
+                st.markdown(
+                    "**Mapa de intercambios internacionales de energía – Contexto del apagón del 28 de abril de 2025**\n\n"
+                    "Este mapa revela cómo se comportaron los **flujos internacionales de energía** en torno al **apagón del 28 de abril de 2025**.\n\n"
+                    "Una **disminución en los intercambios con Francia o Marruecos** podría indicar una disrupción en el suministro internacional "
+                    "o un corte de emergencia.\n\n"
+                    "Si **España aparece como exportadora neta incluso durante el apagón**, esto sugiere que el problema no fue de generación, "
+                    "sino posiblemente **interno** (fallo en la red o desconexión de carga).\n\n"
+                    "La inclusión de **Andorra y Marruecos** proporciona un contexto más completo del comportamiento eléctrico en la península "
+                    "y el norte de África.\n\n"
+                    "Este gráfico es crucial para analizar si los intercambios internacionales actuaron de forma inusual, lo cual puede dar pistas "
+                    "sobre causas externas o coordinación regional durante el evento."
+                )
+
                 # Mostrar en Streamlit
                 st_folium(world_map, width=1285)
 
@@ -619,7 +915,14 @@ def main():
                 df_ib_grouped = df_ib.groupby(['datetime', 'primary_category'])['value'].sum().reset_index()
 
                 df_ib_grouped['value'] = df_ib_grouped['value'].abs()
-
+                st.markdown(
+                    "**Intercambios de energía con Baleares (Primer semestre 2025)**\n\n"
+                    "Durante el primer semestre de **2025**, las **salidas de energía hacia Baleares** superan consistentemente a las entradas, "
+                    "lo que indica que el sistema peninsular actúa mayormente como **exportador neto de energía**.\n\n"
+                    "Ambos flujos muestran una **tendencia creciente hacia junio**, especialmente las salidas, lo que podría reflejar un aumento "
+                    "en la demanda en Baleares o una mejora en la capacidad exportadora del sistema."
+                )
+                
                 fig = px.area(
                     df_ib_grouped,
                     x="datetime",
@@ -657,7 +960,13 @@ def main():
                 .pivot(index='weekday', columns='hour', values='value')
                 .reindex(days_order)
             )
-
+            st.markdown(
+                "**Demanda promedio por día y hora**\n\n"
+                "La demanda eléctrica promedio es más alta entre semana, especialmente de **lunes a viernes**, "
+                "con picos concentrados entre las **7:00 y 21:00 horas**. El máximo se registra los **viernes alrededor de las 19:00 h**, "
+                "superando los **32 000 MW**.\n\n"
+                "En contraste, los **fines de semana** muestran una demanda notablemente más baja y estable."
+            )
             fig1 = px.imshow(
                 heatmap_data,
                 labels=dict(x="Hora del día", y="Día de la semana", color="Demanda promedio (MW)"),
@@ -675,7 +984,14 @@ def main():
             df_box = df.copy()
 
             df_box["month"] = df_box["datetime"].dt.month
-
+            st.markdown(
+                "**Distribución de Demanda por mes (2025)**\n\n"
+                "La demanda eléctrica presenta **mayor variabilidad y valores más altos en los primeros tres meses del año**, "
+                "especialmente en **enero**.\n\n"
+                "En **abril**, se observa una mayor cantidad de valores atípicos a la baja, lo cual coincide con el "
+                "**apagón nacional del 28/04/2025**, donde España estuvo sin luz durante aproximadamente 8 a 10 horas.\n\n"
+                "A partir de **mayo**, la demanda se estabiliza ligeramente, con una reducción progresiva en la mediana mensual."
+            )
             fig2 = px.box(
                 df_box,
                 x="month",
@@ -688,7 +1004,7 @@ def main():
             st.plotly_chart(fig2, use_container_width=True)
 
         else:
-            st.markdown("Nada que ver... de momento 😴")
+            st.markdown("Nada que ver... de momento")
 
 if __name__ == "__main__":
     main()
