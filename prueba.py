@@ -15,6 +15,7 @@ import folium
 from streamlit_folium import st_folium
 from folium.features import GeoJsonTooltip
 import branca.colormap as cm
+from branca.element import Template, MacroElement
 
 st.set_page_config(page_title="Red Eléctrica", layout="centered")
 
@@ -923,12 +924,16 @@ def main():
                 # Crear mapa base
                 world_map = folium.Map(location=[40, 0], zoom_start=5)
 
-                # Crear colormap continuo (de azul a rojo)
-                min_saldo = min(country_data.values())
-                max_saldo = max(country_data.values())
-                colormap = cm.LinearColormap(colors=["blue", "white", "red"], vmin=min_saldo, vmax=max_saldo)
+                # Establecer rango fijo para que el color blanco siempre sea cero
+                vmin = -8000000  # Ajusta según el rango máximo esperado de exportación
+                vmax = 8000000  # Ajusta según el rango máximo esperado de importación
 
-                # Insertar saldo como propiedad en el GeoJSON para poder mostrarlo en el tooltip
+                colormap = cm.LinearColormap(
+                    colors=["blue", "white", "red"],
+                    vmin=vmin, vmax=vmax
+                )
+
+                # Insertar saldo como propiedad en el GeoJSON
                 for feature in world_geo["features"]:
                     country_name = feature["properties"]["name"]
                     saldo = country_data.get(country_name)
@@ -939,10 +944,10 @@ def main():
                     world_geo,
                     style_function=lambda feature: {
                         'fillColor': colormap(feature["properties"]["saldo"])
-                        if feature["properties"]["saldo"] != "No disponible" else 'lightgray',
+                        if isinstance(feature["properties"]["saldo"], (int, float)) else 'black',
                         'color': 'black',
                         'weight': 1,
-                        'fillOpacity': 0.7 if feature["properties"]["saldo"] != "No disponible" else 0.3,
+                        'fillOpacity': 0.7 if isinstance(feature["properties"]["saldo"], (int, float)) else 0.3,
                     },
                     tooltip=GeoJsonTooltip(
                         fields=['name', 'saldo'],
@@ -955,9 +960,42 @@ def main():
                     highlight_function=lambda x: {'weight': 3, 'color': 'blue'}
                 ).add_to(world_map)
 
-                # Añadir leyenda que funcione en Streamlit Cloud
-                colormap.caption = 'Saldo neto de energía (MWh)'
-                colormap.add_to(world_map)
+                # Crear leyenda personalizada como MacroElement
+                legend_html = f"""
+                    {{% macro html(this, kwargs) %}}
+
+                    <div style="
+                        position: fixed;
+                        bottom: 50px;
+                        left: 50px;
+                        width: 250px;
+                        height: 120px;
+                        background-color: white;
+                        border:2px solid grey;
+                        z-index:9999;
+                        font-size:14px;
+                        padding: 10px;
+                        ">
+                        <b>Saldo neto de energía (MWh)</b><br><br>
+                        <div style="
+                            width: 200px;
+                            height: 20px;
+                            background: linear-gradient(to right, blue, white, red);
+                            border: 1px solid black;
+                        "></div>
+                        <div style="display: flex; justify-content: space-between; width: 200px;">
+                            <span style="font-size:12px;">{vmin} MWh</span>
+                            <span style="font-size:12px;">0</span>
+                            <span style="font-size:12px;">{vmax} MWh</span>
+                        </div>
+                    </div>
+
+                    {{% endmacro %}}
+                    """
+
+                legend = MacroElement()
+                legend._template = Template(legend_html)
+                world_map.get_root().add_child(legend)
 
                 st_folium(world_map, width=1285, height=600)
 
@@ -973,7 +1011,6 @@ def main():
                     "Este gráfico es crucial para analizar si los intercambios internacionales actuaron de forma inusual, lo cual puede dar pistas "
                     "sobre causas externas o coordinación regional durante el evento."
                 )
-
             elif tabla == "intercambios_baleares":
                 # Filtramos las dos categorías
                 df_ib = df[df['primary_category'].isin(['Entradas', 'Salidas'])].copy()
