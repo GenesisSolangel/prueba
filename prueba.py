@@ -13,6 +13,8 @@ import os
 import json
 import folium
 from streamlit_folium import st_folium
+from folium.features import GeoJsonTooltip
+import branca.colormap as cm
 
 st.set_page_config(page_title="Red Eléctrica", layout="centered")
 
@@ -80,6 +82,7 @@ def get_data(endpoint_name, endpoint_info, params):
 
     return data
 
+
 # Función para insertar cada DataFrame en Supabase
 def insertar_en_supabase(nombre_tabla, df):
     df = df.copy()
@@ -93,7 +96,7 @@ def insertar_en_supabase(nombre_tabla, df):
             df[col] = df[col].astype(str)
 
     # Reemplazamos NaN por None
-    #df = df.where(pd.notnull(df), None)
+    # df = df.where(pd.notnull(df), None)
 
     # Convertir a lista de diccionarios e insertar
     data = df.to_dict(orient="records")
@@ -103,6 +106,7 @@ def insertar_en_supabase(nombre_tabla, df):
         print(f"✅ Insertados en '{nombre_tabla}': {len(data)} filas")
     except Exception as e:
         print(f"❌ Error al insertar en '{nombre_tabla}': {e}")
+
 
 # ------------------------------ FUNCIONES DE DESCARGA ------------------------------
 # Función de extracción de datos de los últimos x años, devuelve DataFrame. Ejecutar una vez al inicio para poblar la base de datos.
@@ -139,7 +143,7 @@ def get_data_for_last_x_years(num_years=3):
 
                 if data:
                     df = pd.DataFrame(data)
-                    #Lidiamos con problemas de zona horaria en la columna "datetime"
+                    # Lidiamos con problemas de zona horaria en la columna "datetime"
                     try:
                         df['datetime'] = pd.to_datetime(df['datetime'], utc=True)
                     except Exception:
@@ -166,11 +170,15 @@ def get_data_for_last_x_years(num_years=3):
                 all_dfs.append(df_nuevo)
 
                 tablas_dfs = {
-                    "demanda": df_nuevo[df_nuevo["endpoint"] == "demanda"].drop(columns=["endpoint", "sub_category"], errors='ignore'),
+                    "demanda": df_nuevo[df_nuevo["endpoint"] == "demanda"].drop(columns=["endpoint", "sub_category"],
+                                                                                errors='ignore'),
                     "balance": df_nuevo[df_nuevo["endpoint"] == "balance"].drop(columns=["endpoint"], errors='ignore'),
-                    "generacion": df_nuevo[df_nuevo["endpoint"] == "generacion"].drop(columns=["endpoint", "sub_category"], errors='ignore'),
-                    "intercambios": df_nuevo[df_nuevo["endpoint"] == "intercambios"].drop(columns=["endpoint"], errors='ignore'),
-                    "intercambios_baleares": df_nuevo[df_nuevo["endpoint"] == "intercambios_baleares"].drop(columns=["endpoint", "sub_category"], errors='ignore'),
+                    "generacion": df_nuevo[df_nuevo["endpoint"] == "generacion"].drop(
+                        columns=["endpoint", "sub_category"], errors='ignore'),
+                    "intercambios": df_nuevo[df_nuevo["endpoint"] == "intercambios"].drop(columns=["endpoint"],
+                                                                                          errors='ignore'),
+                    "intercambios_baleares": df_nuevo[df_nuevo["endpoint"] == "intercambios_baleares"].drop(
+                        columns=["endpoint", "sub_category"], errors='ignore'),
                 }
 
                 for tabla, df_tabla in tablas_dfs.items():
@@ -178,6 +186,7 @@ def get_data_for_last_x_years(num_years=3):
                         insertar_en_supabase(tabla, df_tabla)
 
     return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
+
 
 # Función para actualizar los datos desde la API cada 24 horas
 def actualizar_datos_desde_api():
@@ -230,12 +239,14 @@ def actualizar_datos_desde_api():
             "balance": df_nuevo[df_nuevo["endpoint"] == "balance"].drop(columns=["endpoint"]),
             "generacion": df_nuevo[df_nuevo["endpoint"] == "generacion"].drop(columns=["endpoint", "sub_category"]),
             "intercambios": df_nuevo[df_nuevo["endpoint"] == "intercambios"].drop(columns=["endpoint"]),
-            "intercambios_baleares": df_nuevo[df_nuevo["endpoint"] == "intercambios_baleares"].drop(columns=["endpoint", "sub_category"]),
+            "intercambios_baleares": df_nuevo[df_nuevo["endpoint"] == "intercambios_baleares"].drop(
+                columns=["endpoint", "sub_category"]),
         }
 
         for tabla, df in tablas_dfs.items():
             if not df.empty:
                 insertar_en_supabase(tabla, df)
+
 
 # Programador para actualizar datos desde la API cada 24 horas
 def iniciar_programador_api():
@@ -244,7 +255,8 @@ def iniciar_programador_api():
         schedule.run_pending()
         tiempo.sleep(60)
 
-#threading.Thread(target=iniciar_programador_api, daemon=True).start()
+
+# threading.Thread(target=iniciar_programador_api, daemon=True).start()
 
 # ------------------------------ CONSULTA SUPABASE ------------------------------
 
@@ -277,6 +289,7 @@ def get_data_from_supabase(table_name, start_date, end_date, page_size=1000):
     df = pd.DataFrame(all_data)
     df["datetime"] = pd.to_datetime(df["datetime"])
     return df
+
 
 # ------------------------------ UTILIDADES ------------------------------
 
@@ -319,6 +332,7 @@ def get_data(endpoint_name, endpoint_info, params):
 
     return data
 
+
 # Función para insertar cada DataFrame en Supabase
 def insertar_en_supabase(nombre_tabla, df):
     df = df.copy()
@@ -332,7 +346,7 @@ def insertar_en_supabase(nombre_tabla, df):
             df[col] = df[col].astype(str)
 
     # Reemplazamos NaN por None
-    #df = df.where(pd.notnull(df), None)
+    # df = df.where(pd.notnull(df), None)
 
     # Convertir a lista de diccionarios e insertar
     data = df.to_dict(orient="records")
@@ -342,6 +356,7 @@ def insertar_en_supabase(nombre_tabla, df):
         print(f"✅ Insertados en '{nombre_tabla}': {len(data)} filas")
     except Exception as e:
         print(f"❌ Error al insertar en '{nombre_tabla}': {e}")
+
 
 # ------------------------------ FUNCIONES DE DESCARGA ------------------------------
 # Función de extracción de datos de los últimos x años, devuelve DataFrame. Ejecutar una vez al inicio para poblar la base de datos.
@@ -378,7 +393,7 @@ def get_data_for_last_x_years(num_years=3):
 
                 if data:
                     df = pd.DataFrame(data)
-                    #Lidiamos con problemas de zona horaria en la columna "datetime"
+                    # Lidiamos con problemas de zona horaria en la columna "datetime"
                     try:
                         df['datetime'] = pd.to_datetime(df['datetime'], utc=True)
                     except Exception:
@@ -405,11 +420,15 @@ def get_data_for_last_x_years(num_years=3):
                 all_dfs.append(df_nuevo)
 
                 tablas_dfs = {
-                    "demanda": df_nuevo[df_nuevo["endpoint"] == "demanda"].drop(columns=["endpoint", "sub_category"], errors='ignore'),
+                    "demanda": df_nuevo[df_nuevo["endpoint"] == "demanda"].drop(columns=["endpoint", "sub_category"],
+                                                                                errors='ignore'),
                     "balance": df_nuevo[df_nuevo["endpoint"] == "balance"].drop(columns=["endpoint"], errors='ignore'),
-                    "generacion": df_nuevo[df_nuevo["endpoint"] == "generacion"].drop(columns=["endpoint", "sub_category"], errors='ignore'),
-                    "intercambios": df_nuevo[df_nuevo["endpoint"] == "intercambios"].drop(columns=["endpoint"], errors='ignore'),
-                    "intercambios_baleares": df_nuevo[df_nuevo["endpoint"] == "intercambios_baleares"].drop(columns=["endpoint", "sub_category"], errors='ignore'),
+                    "generacion": df_nuevo[df_nuevo["endpoint"] == "generacion"].drop(
+                        columns=["endpoint", "sub_category"], errors='ignore'),
+                    "intercambios": df_nuevo[df_nuevo["endpoint"] == "intercambios"].drop(columns=["endpoint"],
+                                                                                          errors='ignore'),
+                    "intercambios_baleares": df_nuevo[df_nuevo["endpoint"] == "intercambios_baleares"].drop(
+                        columns=["endpoint", "sub_category"], errors='ignore'),
                 }
 
                 for tabla, df_tabla in tablas_dfs.items():
@@ -417,6 +436,7 @@ def get_data_for_last_x_years(num_years=3):
                         insertar_en_supabase(tabla, df_tabla)
 
     return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
+
 
 # Función para actualizar los datos desde la API cada 24 horas
 def actualizar_datos_desde_api():
@@ -469,12 +489,14 @@ def actualizar_datos_desde_api():
             "balance": df_nuevo[df_nuevo["endpoint"] == "balance"].drop(columns=["endpoint"]),
             "generacion": df_nuevo[df_nuevo["endpoint"] == "generacion"].drop(columns=["endpoint", "sub_category"]),
             "intercambios": df_nuevo[df_nuevo["endpoint"] == "intercambios"].drop(columns=["endpoint"]),
-            "intercambios_baleares": df_nuevo[df_nuevo["endpoint"] == "intercambios_baleares"].drop(columns=["endpoint", "sub_category"]),
+            "intercambios_baleares": df_nuevo[df_nuevo["endpoint"] == "intercambios_baleares"].drop(
+                columns=["endpoint", "sub_category"]),
         }
 
         for tabla, df in tablas_dfs.items():
             if not df.empty:
                 insertar_en_supabase(tabla, df)
+
 
 # Programador para actualizar datos desde la API cada 24 horas
 def iniciar_programador_api():
@@ -483,7 +505,9 @@ def iniciar_programador_api():
         schedule.run_pending()
         tiempo.sleep(60)
 
+
 threading.Thread(target=iniciar_programador_api, daemon=True).start()
+
 
 # ------------------------------ CONSULTA SUPABASE ------------------------------
 
@@ -516,6 +540,7 @@ def get_data_from_supabase(table_name, start_date, end_date, page_size=1000):
     df = pd.DataFrame(all_data)
     df["datetime"] = pd.to_datetime(df["datetime"])
     return df
+
 
 # ------------------------------ INTERFAZ ------------------------------
 
@@ -561,7 +586,8 @@ def main():
         # Mostrar resultados después de la consulta de cualquier modo
         if not df.empty:
             st.session_state["ree_data"] = df
-            st.session_state["tabla"] = tabla  # Esto es redundante si usas tabla_seleccionada_en_tab2, pero lo mantengo por seguridad
+            st.session_state[
+                "tabla"] = tabla  # Esto es redundante si usas tabla_seleccionada_en_tab2, pero lo mantengo por seguridad
             st.write(f"Datos recuperados: {len(df)} filas")
             st.write("Último dato:", df['datetime'].max())
             st.success("Datos cargados correctamente desde Supabase.")
@@ -758,7 +784,6 @@ def main():
                         "no se consideran outliers según el criterio del rango intercuartílico (IQR)."
                     )
 
-
                     # Asegurarse de que el df tiene la columna 'year'
                     if 'year' not in df.columns:
                         df['year'] = df['datetime'].dt.year
@@ -814,7 +839,24 @@ def main():
                         "Selecciona el modo 'Histórico' para ver la comparativa de años y la identificación de outliers anuales, o 'Año específico' para el histograma de demanda con outliers.")
 
             elif tabla == "balance":
-                fig = px.bar(df, x="datetime", y="value", color="primary_category", barmode="group", title="Balance Eléctrico")
+                df_balance = df.groupby([df["datetime"].dt.date, "primary_category"])["value"].sum().reset_index()
+                df_balance.rename(columns={"datetime": "date"}, inplace=True)
+                df_balance = df_balance.sort_values("date")
+                fig = px.line(
+                    df_balance,
+                    x="date",
+                    y="value",
+                    color="primary_category",
+                    title="Balance Eléctrico Diario"
+                )
+
+                fig.update_layout(
+                    xaxis_title="Fecha",
+                    yaxis_title="MWh",
+                    legend_title="Categoría",
+                    template="plotly_white"
+                )
+
                 st.plotly_chart(fig, use_container_width=True)
                 st.markdown(
                     "**Balance eléctrico diario por categoría**\n\n"
@@ -822,7 +864,7 @@ def main():
                     "principales del sistema: generación, consumo, pérdidas y exportaciones.\n\n"
                     "Es útil para entender si hay superávit, déficit o equilibrio en la red cada día, y cómo se distribuye el uso de energía entre sectores."
                 )
-            
+
             elif tabla == "generacion":
                 df['date'] = df['datetime'].dt.date  # Para reducir a nivel diario (si no lo tienes)
 
@@ -844,7 +886,7 @@ def main():
                     "de tecnologías de base como la nuclear. Es clave para analizar la transición energética."
                 )
 
-            
+
             elif tabla == "intercambios":
                 st.subheader("Mapa Coroplético de Intercambios Eléctricos")
 
@@ -857,12 +899,11 @@ def main():
                     "y analizar cómo varían los flujos en situaciones especiales como picos de demanda o apagones."
                 )
 
-                    # Agrupamos y renombramos columnas
+                # Agrupar y renombrar columnas
                 df_map = df.groupby("primary_category")["value"].sum().reset_index()
                 df_map.columns = ["pais_original", "Total"]
 
-
-                # Mapeo de nombres a inglés (para coincidir con el GeoJSON)
+                # Mapeo de nombres a inglés
                 nombre_map = {
                     "francia": "France",
                     "portugal": "Portugal",
@@ -870,26 +911,55 @@ def main():
                     "marruecos": "Morocco"
                 }
                 df_map["Country"] = df_map["pais_original"].map(nombre_map)
-
                 df_map = df_map.dropna(subset=["Country"])
 
-                # Cargar el archivo GeoJSON
+                # Crear diccionario país → saldo
+                country_data = df_map.set_index("Country")["Total"].to_dict()
+
+                # Cargar GeoJSON
                 with open("world_countries_with_andorra.json", "r", encoding="utf-8") as f:
                     world_geo = json.load(f)
 
-                # Crear el mapa
-                world_map = folium.Map(location=[40, 20], zoom_start=4)
+                # Crear mapa base
+                world_map = folium.Map(location=[40, 0], zoom_start=5)
 
-                folium.Choropleth(
-                    geo_data=world_geo,
-                    data=df_map,
-                    columns=["Country", "Total"],
-                    key_on="feature.properties.name",
-                    fill_color="RdBu",
-                    fill_opacity=0.7,
-                    line_opacity=0.2,
-                    legend_name="Saldo neto de energía (MWh)"
+                # Crear colormap continuo (de azul a rojo)
+                min_saldo = min(country_data.values())
+                max_saldo = max(country_data.values())
+                colormap = cm.LinearColormap(colors=["blue", "white", "red"], vmin=min_saldo, vmax=max_saldo)
+
+                # Insertar saldo como propiedad en el GeoJSON para poder mostrarlo en el tooltip
+                for feature in world_geo["features"]:
+                    country_name = feature["properties"]["name"]
+                    saldo = country_data.get(country_name)
+                    feature["properties"]["saldo"] = saldo if saldo is not None else "No disponible"
+
+                # Añadir capa GeoJson con estilos y tooltips
+                folium.GeoJson(
+                    world_geo,
+                    style_function=lambda feature: {
+                        'fillColor': colormap(feature["properties"]["saldo"])
+                        if feature["properties"]["saldo"] != "No disponible" else 'lightgray',
+                        'color': 'black',
+                        'weight': 1,
+                        'fillOpacity': 0.7 if feature["properties"]["saldo"] != "No disponible" else 0.3,
+                    },
+                    tooltip=GeoJsonTooltip(
+                        fields=['name', 'saldo'],
+                        aliases=['País:', 'Saldo (MWh):'],
+                        labels=True,
+                        sticky=True,
+                        localize=True,
+                        toLocaleString=True
+                    ),
+                    highlight_function=lambda x: {'weight': 3, 'color': 'blue'}
                 ).add_to(world_map)
+
+                # Añadir leyenda que funcione en Streamlit Cloud
+                colormap.caption = 'Saldo neto de energía (MWh)'
+                colormap.add_to(world_map)
+
+                st_folium(world_map, width=1285, height=600)
 
                 st.markdown(
                     "**Mapa de intercambios internacionales de energía – Contexto del apagón del 28 de abril de 2025**\n\n"
@@ -903,9 +973,6 @@ def main():
                     "Este gráfico es crucial para analizar si los intercambios internacionales actuaron de forma inusual, lo cual puede dar pistas "
                     "sobre causas externas o coordinación regional durante el evento."
                 )
-
-                # Mostrar en Streamlit
-                st_folium(world_map, width=1285)
 
             elif tabla == "intercambios_baleares":
                 # Filtramos las dos categorías
@@ -922,7 +989,7 @@ def main():
                     "Ambos flujos muestran una **tendencia creciente hacia junio**, especialmente las salidas, lo que podría reflejar un aumento "
                     "en la demanda en Baleares o una mejora en la capacidad exportadora del sistema."
                 )
-                
+
                 fig = px.area(
                     df_ib_grouped,
                     x="datetime",
@@ -936,7 +1003,6 @@ def main():
             else:
                 fig = px.line(df, x="datetime", y="value", title="Visualización")
                 st.plotly_chart(fig, use_container_width=True)
-
 
             with st.expander("Ver datos en tabla"):
                 st.dataframe(df, use_container_width=True)
@@ -977,7 +1043,6 @@ def main():
             )
             fig1.update_layout(title="Demanda promedio por día y hora")
 
-
             st.plotly_chart(fig1, use_container_width=True)
 
             # --- BOXPLOT ---
@@ -1000,11 +1065,11 @@ def main():
                 labels={"value": "Demanda (MWh)", "hour": "Hora del Día"}
             )
 
-
             st.plotly_chart(fig2, use_container_width=True)
 
         else:
             st.markdown("Nada que ver... de momento")
+
 
 if __name__ == "__main__":
     main()
