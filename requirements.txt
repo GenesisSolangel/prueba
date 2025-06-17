@@ -14,3 +14,4 @@ supabase
 schedule
 python-dotenv
 tensorflow
+keras
