@@ -13,3 +13,4 @@ scikit-learn
 supabase
 schedule
 python-dotenv
+tensorflow==2.12.0
