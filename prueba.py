@@ -18,10 +18,7 @@ from folium.features import GeoJsonTooltip
 import branca.colormap as cm
 from branca.element import Template, MacroElement
 import numpy as np
-from depuracion_datos import imputar_datos_estacionales, escalar_datos, dividir_train_test
 from sklearn.metrics import mean_squared_error
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import SimpleRNN, Dense
 import pickle
 from keras.models import load_model
 
