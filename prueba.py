@@ -20,7 +20,7 @@ from branca.element import Template, MacroElement
 import numpy as np
 from sklearn.metrics import mean_squared_error
 import pickle
-from tensorflow.keras.models import load_model
+from keras.models import load_model
 
 
 st.set_page_config(page_title="Red Eléctrica", layout="centered")
