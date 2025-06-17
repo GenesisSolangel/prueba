@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 import plotly.express as px
+import plotly.graph_objects as go
 from supabase import create_client, Client
 import schedule
 import threading
@@ -16,6 +17,14 @@ from streamlit_folium import st_folium
 from folium.features import GeoJsonTooltip
 import branca.colormap as cm
 from branca.element import Template, MacroElement
+import numpy as np
+from depuracion_datos import imputar_datos_estacionales, escalar_datos, dividir_train_test
+from sklearn.metrics import mean_squared_error
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import SimpleRNN, Dense
+import pickle
+from keras.models import load_model
+
 
 st.set_page_config(page_title="Red Eléctrica", layout="centered")
 
@@ -296,7 +305,7 @@ def get_data_from_supabase(table_name, start_date, end_date, page_size=1000):
 def main():
     st.title("Análisis de la Red Eléctrica Española")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Descripción", "Consulta de datos", "Visualización", "Extras"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Descripción", "Consulta de datos", "Visualización", "Predicciones", "Extras"])
 
     with tab2:  # Mueve el contexto de la tab2 aquí para que `modo` se defina antes de usarse en session_state
         st.subheader("Consulta de datos")
@@ -588,6 +597,7 @@ def main():
                         "Selecciona el modo 'Histórico' para ver la comparativa de años y la identificación de outliers anuales, o 'Año específico' para el histograma de demanda con outliers.")
 
             elif tabla == "balance":
+
                 df_balance = df.groupby([df["datetime"].dt.date, "primary_category"])["value"].sum().reset_index()
                 df_balance.rename(columns={"datetime": "date"}, inplace=True)
                 df_balance = df_balance.sort_values("date")
@@ -795,6 +805,119 @@ def main():
             st.info("Consulta primero los datos desde la pestaña anterior.")
 
     with tab4:
+        # -------------------------------------------
+        # CONFIGURACIÓN DE STREAMLIT
+        # -------------------------------------------
+        st.title("Predicción de Series Temporales con Modelos Preentrenados")
+
+        # -------------------------------------------
+        # SELECCIÓN DE MODELO Y PÉRDIDA
+        # -------------------------------------------
+        model_type = st.selectbox("Selecciona el modelo", ["SimpleRNN", "LSTM", "GRU"])
+        loss_function = st.selectbox("Función de pérdida", ["mse", "mae"])
+
+        model_filename = f"models/{model_type}_model_{loss_function}.keras"
+        scaler_filename = f"models/scaler_{model_type}_{loss_function}.pkl"
+        history_filename = f"models/{model_type}_history_{loss_function}.pkl"
+
+        # -------------------------------------------
+        # CARGA DEL MODELO Y SCALER
+        # -------------------------------------------
+        try:
+            model = load_model(model_filename)
+            with open(scaler_filename, 'rb') as f:
+                scaler = pickle.load(f)
+            with open(history_filename, 'rb') as f:
+                history = pickle.load(f)
+            st.success(f"Modelo {model_type} con pérdida {loss_function} cargado correctamente.")
+
+            # -------------------------------------------
+            # GRÁFICO DE FUNCIÓN DE PÉRDIDA
+            # -------------------------------------------
+            st.subheader("Gráfico de la función de pérdida")
+            df_loss = pd.DataFrame({
+                'epoch': range(1, len(history['loss']) + 1),
+                'train_loss': history['loss'],
+                'val_loss': history['val_loss']
+            })
+            fig_loss = px.line(df_loss, x='epoch', y=['train_loss', 'val_loss'],
+                               labels={'value': 'Loss', 'epoch': 'Época'},
+                               title='Evolución de la pérdida durante el entrenamiento')
+            st.plotly_chart(fig_loss, use_container_width=True)
+
+            # -------------------------------------------
+            # CARGA DE LOS DATOS
+            # -------------------------------------------
+            df_prediccion = pd.read_csv('datos_prediccion.csv')  # Ajusta al nombre de tu dataset
+            df_prediccion['datetime'] = pd.to_datetime(df_prediccion['datetime'])
+            df_prediccion = df_prediccion.set_index('datetime')
+
+            df_prediccion['value_scaled'] = scaler.transform(df_prediccion[['value']])
+
+            # Preparación de datos
+            n_pasos = 24  # Puedes ponerlo como parámetro si quieres
+            n_pred = 24  # Puedes ponerlo como parámetro si quieres
+
+            def crear_secuencias(datos, n_pasos):
+                X, y = [], []
+                for i in range(len(datos) - n_pasos):
+                    X.append(datos[i:i + n_pasos])
+                    y.append(datos[i + n_pasos])
+                return np.array(X), np.array(y)
+
+            X, y = crear_secuencias(df_prediccion['value_scaled'].values, n_pasos)
+            X = X.reshape((X.shape[0], X.shape[1], 1))
+
+            # -------------------------------------------
+            # ONE-STEP PREDICTION
+            # -------------------------------------------
+            st.subheader("One-Step Prediction")
+
+            y_pred_scaled = model.predict(X)
+            y_pred = scaler.inverse_transform(y_pred_scaled)
+            y_real = scaler.inverse_transform(y.reshape(-1, 1))
+
+            df_pred = pd.DataFrame({
+                'Real': y_real.flatten(),
+                'Predicción': y_pred.flatten()
+            }, index=df_prediccion.index[n_pasos:])
+
+            fig_pred = px.line(df_pred.head(200), title="Predicción vs Real (One-Step)")
+            st.plotly_chart(fig_pred, use_container_width=True)
+
+            mse = mean_squared_error(y_real, y_pred)
+            st.metric(label="MSE (Error cuadrático medio)", value=f"{mse:.2f}")
+
+            # -------------------------------------------
+            # MULTI-STEP PREDICTION
+            # -------------------------------------------
+            st.subheader("Multi-Step Prediction")
+
+            ultimos_valores = df_prediccion['value_scaled'].values[-n_pasos:].tolist()
+            predicciones_multi = []
+
+            for _ in range(n_pred):
+                entrada = np.array(ultimos_valores[-n_pasos:]).reshape((1, n_pasos, 1))
+                pred_scaled = model.predict(entrada)[0][0]
+                predicciones_multi.append(pred_scaled)
+                ultimos_valores.append(pred_scaled)
+
+            predicciones_multi = scaler.inverse_transform(np.array(predicciones_multi).reshape(-1, 1)).flatten()
+
+            fechas_futuras = pd.date_range(start=df_prediccion.index[-1] + pd.Timedelta(hours=1), periods=n_pred, freq='H')
+
+            fig_multi = go.Figure()
+            fig_multi.add_trace(go.Scatter(x=df_prediccion.index, y=df_prediccion['value'], mode='lines', name='Datos reales'))
+            fig_multi.add_trace(
+                go.Scatter(x=fechas_futuras, y=predicciones_multi, mode='lines+markers', name='Predicción Multi-Step'))
+
+            fig_multi.update_layout(title="Predicción Multi-Step", xaxis_title="Fecha", yaxis_title="Valor")
+            st.plotly_chart(fig_multi, use_container_width=True)
+
+        except Exception as e:
+            st.warning(f"❌ El modelo {model_type} con pérdida {loss_function} no se encuentra o ocurrió un error.\n{e}")
+
+    with tab5:
         if tabla == "demanda":
 
             # --- HEATMAP ---
