@@ -13,5 +13,4 @@ scikit-learn
 supabase
 schedule
 python-dotenv
-tensorflow
-keras
+onnxruntime
