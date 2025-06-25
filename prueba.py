@@ -259,7 +259,15 @@ def actualizar_datos_desde_api():
 
 # Programador para actualizar datos desde la API cada 24 horas
 def iniciar_programador_api():
+    global scheduler_initialized
+    if scheduler_initialized:
+        print("✅ Scheduler ya iniciado, no se volverá a iniciar.")
+        return
+
+    print("🔁 Iniciando scheduler...")
     schedule.every(24).hours.do(actualizar_datos_desde_api)
+    scheduler_initialized = True
+
     while True:
         schedule.run_pending()
         tiempo.sleep(60)
@@ -304,6 +312,40 @@ def get_data_from_supabase(table_name, start_date, end_date, page_size=1000):
 def main():
     st.title("Análisis y Predicción de la Red Eléctrica Española (REE)")
 
+    # -------------------------
+    # CACHÉ DE MODELOS Y DATOS
+    # -------------------------
+    @st.cache_resource
+    def cargar_modelo_onnx(ruta):
+        return ort.InferenceSession(ruta)
+
+    @st.cache_resource
+    def cargar_scaler(ruta):
+        with open(ruta, 'rb') as f:
+            return pickle.load(f)
+
+    @st.cache_data
+    def cargar_historial(ruta):
+        with open(ruta, 'rb') as f:
+            return pickle.load(f)
+
+    @st.cache_data
+    def cargar_datos_prediccion():
+        df = pd.read_csv('datos_prediccion.csv')  # optimizar: cargar solo últimas semanas
+        df['datetime'] = pd.to_datetime(df['datetime'])
+        df = df.set_index('datetime')
+        return df
+
+    @st.cache_data
+    def cargar_datos_prophet():
+        df = pd.read_csv('datos_prediccion_prophet.csv')
+        df['ds'] = pd.to_datetime(df['ds'])
+        return df
+
+    @st.cache_resource
+    def cargar_modelo_prophet(granularidad):
+        return joblib.load(f'models/prophet_model_{granularidad}.joblib')
+
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Descripción","Visualización","Comparador","Predicciones: RNN","Predicciones: Prophet","Extras","Quiénes somos"])
 
     with st.sidebar:
@@ -324,13 +366,13 @@ def main():
             st.session_state["selected_year_for_viz"] = None
         elif modo == "Año específico":
             current_year = datetime.now().year
-            año = st.selectbox("Selecciona el año:", [current_year - i for i in range(3)], index=0,
+            año = st.selectbox("Selecciona el año:", [current_year - i for i in range(11)], index=0,
                                key="query_year_select")
             st.session_state["selected_year_for_viz"] = año
             start_date_query = datetime(año, 1, 1, tzinfo=timezone.utc)
             end_date_query = datetime(año, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc)
         elif modo == "Histórico":
-            start_date_query = datetime(2022, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+            start_date_query = datetime(2015, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
             end_date_query = datetime.now(timezone.utc)
             st.session_state["selected_year_for_viz"] = None
 
@@ -391,11 +433,13 @@ def main():
             modo_actual = st.session_state.get("modo_seleccionado", "Últimos días")  # Obtener el modo
 
             if tabla == "demanda":
-                fig = px.area(df, x="datetime", y="value", title="Demanda Eléctrica", labels={"value": "MW"})
-                st.plotly_chart(fig, use_container_width=True)
-
-                # --- Nuevo gráfico: Histograma de demanda con outliers para año específico ---
+                if modo_actual == "Últimos días":
+                    fig = px.area(df, x="datetime", y="value", title="Demanda Eléctrica", labels={"value": "MW"})
+                    st.plotly_chart(fig, use_container_width=True)
+                # Histograma de demanda con outliers para año específico
                 if modo_actual == "Año específico":
+                    fig = px.area(df, x="datetime", y="value", title="Demanda Eléctrica", labels={"value": "MW"})
+                    st.plotly_chart(fig, use_container_width=True)
                     año_seleccionado = st.session_state.get("selected_year_for_viz")
                     if año_seleccionado is None:
                         st.warning(
@@ -450,6 +494,18 @@ def main():
                         else:
                             st.warning(
                                 f"No hay datos de demanda para el año {año_seleccionado} para generar el histograma.")
+                if modo_actual == "Histórico":
+                    df_annual_summary = df.groupby('year')['value'].sum().reset_index()
+                    df_annual_summary.rename(columns={'value': 'total_demand_MW'}, inplace=True)
+                    fig_hist_bar = px.bar(
+                        df_annual_summary,
+                        x='year',
+                        y='total_demand_MW',
+                        title='Demanda Total Anual',
+                        labels={'total_demand_MW': 'Demanda Total Anual (MW)', 'year': 'Año'},
+                    )
+
+                    st.plotly_chart(fig_hist_bar, use_container_width=True)
 
             elif tabla == "balance":
 
@@ -799,133 +855,89 @@ def main():
         # CONFIGURACIÓN DE STREAMLIT
         # -------------------------------------------
         st.subheader("Predicción de series temporales con modelos de Redes Neuronales Recurrentes")
-
-        # -------------------------------------------
-        # SELECCIÓN DE MODELO Y PÉRDIDA
-        # -------------------------------------------
-        model_type = st.selectbox("Selecciona el modelo", ["SimpleRNN", "LSTM", "GRU"])
+        model_type = st.selectbox("Modelo RNN", ["SimpleRNN", "LSTM", "GRU"])
         loss_function = st.selectbox("Función de pérdida", ["mse", "mae"])
+        n_pred = st.slider("Pasos a predecir (Multi-Step)", 1, 100, 24, step=1)
+        calcular_rnn = st.button("Calcular predicción RNN")
 
-        model_filename = f'models/{model_type}_model_{loss_function}.onnx'
-        scaler_filename = f'models/scaler_{model_type}_{loss_function}.pkl'
-        history_filename = f'models/{model_type}_history_{loss_function}.pkl'
+
+        model_name = f"{model_type}_model_{loss_function}"
+        model_path = f"models/{model_name}.onnx"
+        scaler_path = f"models/scaler_{model_type}_{loss_function}.pkl"
+        history_path = f"models/{model_type}_history_{loss_function}.pkl"
 
         try:
-            # Cargar modelo ONNX
-            session  = ort.InferenceSession(model_filename)
+            session = cargar_modelo_onnx(model_path)
+            scaler = cargar_scaler(scaler_path)
+            history = cargar_historial(history_path)
+            df_rnn = cargar_datos_prediccion()
+            st.success("Recursos RNN cargados.")
+        except Exception as e:
+            st.error(f"Error al cargar recursos RNN: {e}")
+            st.stop()
 
-            # Cargar scaler
-            with open(scaler_filename, 'rb') as f:
-                scaler = pickle.load(f)
+        st.subheader("Evolución de la pérdida (RNN)")
+        df_loss = pd.DataFrame({
+            'Época': range(1, len(history['loss']) + 1),
+            'Entrenamiento': history['loss'],
+            'Validación': history['val_loss']
+        })
+        fig_loss = px.line(df_loss, x='Época', y=['Entrenamiento', 'Validación'])
+        st.plotly_chart(fig_loss, use_container_width=True)
 
-            # Cargar history
-            with open(history_filename, 'rb') as f:
-                history = pickle.load(f)
+        n_pasos = 24
+        serie = scaler.transform(df_rnn[['value']])
 
-            st.success(f"Modelo {model_filename} cargado correctamente.")
+        X, y = [], []
+        for i in range(len(serie) - n_pasos):
+            X.append(serie[i:i + n_pasos])
+            y.append(serie[i + n_pasos])
+        X = np.array(X).reshape(-1, n_pasos, 1).astype('float32')
+        y = np.array(y)
 
-            # -------------------------------------------
-            # GRÁFICO DE FUNCIÓN DE PÉRDIDA
-            # -------------------------------------------
-            st.subheader("Gráfico de la función de pérdida")
-            df_loss = pd.DataFrame({
-                'epoch': range(1, len(history['loss']) + 1),
-                'train_loss': history['loss'],
-                'val_loss': history['val_loss']
-            })
-            fig_loss = px.line(df_loss, x='epoch', y=['train_loss', 'val_loss'],
-                               labels={'value': 'Loss', 'epoch': 'Época'},
-                               title='Evolución de la pérdida durante el entrenamiento')
-            st.plotly_chart(fig_loss, use_container_width=True)
+        input_name = session.get_inputs()[0].name
 
-            # -------------------------------------------
-            # CARGA DE LOS DATOS
-            # -------------------------------------------
-            df_prediccion = pd.read_csv('datos_prediccion.csv')
-            df_prediccion['datetime'] = pd.to_datetime(df_prediccion['datetime'])
-            df_prediccion = df_prediccion.set_index('datetime')
 
-            df_prediccion['value_scaled'] = scaler.transform(df_prediccion[['value']])
-
-            # Preparación de datos
-            n_pasos = 24
-
-            def crear_secuencias(datos, n_pasos):
-                X, y = [], []
-                for i in range(len(datos) - n_pasos):
-                    X.append(datos[i:i + n_pasos])
-                    y.append(datos[i + n_pasos])
-                return np.array(X), np.array(y)
-
-            X, y = crear_secuencias(df_prediccion['value_scaled'].values, n_pasos)
-            X = X.reshape((X.shape[0], X.shape[1], 1)).astype('float32')
-
-            # Preparar la sesión ONNX
-            input_name = session.get_inputs()[0].name
-
-            # -------------------------------------------
-            # ONE-STEP PREDICTION
-            # -------------------------------------------
-            st.subheader("One-Step Prediction")
-
-            y_pred_scaled = []
-            for i in range(X.shape[0]):
-                pred = session.run(None, {input_name: X[i:i + 1]})[0]
-                y_pred_scaled.append(pred[0][0])
-
-            y_pred_scaled = np.array(y_pred_scaled).reshape(-1, 1)
-            y_pred = scaler.inverse_transform(y_pred_scaled)
+        if calcular_rnn:
+            st.subheader("Predicción One-Step (RNN)")
+            y_pred_scaled = [session.run(None, {input_name: X[i:i + 1]})[0][0][0] for i in range(X.shape[0])]
+            y_pred = scaler.inverse_transform(np.array(y_pred_scaled).reshape(-1, 1))
             y_real = scaler.inverse_transform(y.reshape(-1, 1))
 
             df_pred = pd.DataFrame({
                 'Real': y_real.flatten(),
                 'Predicción': y_pred.flatten()
-            }, index=df_prediccion.index[n_pasos:])
+            }, index=df_rnn.index[n_pasos:])
 
-            fig_pred = px.line(df_pred.head(200), title="Predicción vs Real (One-Step)")
-            st.plotly_chart(fig_pred, use_container_width=True)
+            with st.expander("Ver gráfico One-Step"):
+                fig_pred = px.line(df_pred.tail(100), title="Predicción vs Real (últimos 100 puntos)")
+                st.plotly_chart(fig_pred, use_container_width=True)
 
-            mse = mean_squared_error(y_real, y_pred)
-            st.metric(label="MSE (Error cuadrático medio)", value=f"{mse:.2f}")
+            st.metric("MSE (One-Step)", f"{mean_squared_error(y_real, y_pred):.2f}")
 
-            # -------------------------------------------
-            # MULTI-STEP PREDICTION
-            # -------------------------------------------
-            st.subheader("Multi-Step Prediction")
-
-            # Elegir número de pasos a predecir
-            n_pred = st.slider("Número de pasos a predecir (Multi-Step)", min_value=1, max_value=168, value=24, step=1)
-
-            ultimos_valores = df_prediccion['value_scaled'].values[-n_pasos:].tolist()
-            predicciones_multi = []
+            st.subheader("Predicción Multi-Step (RNN)")
+            ultimos_valores = serie[-n_pasos:].flatten().tolist()
+            preds_multi = []
 
             for _ in range(n_pred):
-                entrada = np.array(ultimos_valores[-n_pasos:]).reshape((1, n_pasos, 1)).astype('float32')
-                pred_scaled = session.run(None, {input_name: entrada})[0][0][0]
-                predicciones_multi.append(pred_scaled)
-                ultimos_valores.append(pred_scaled)
+                entrada = np.array(ultimos_valores[-n_pasos:]).reshape(1, n_pasos, 1).astype('float32')
+                pred = session.run(None, {input_name: entrada})[0][0][0]
+                preds_multi.append(pred)
+                ultimos_valores.append(pred)
 
-            predicciones_multi = scaler.inverse_transform(np.array(predicciones_multi).reshape(-1, 1)).flatten()
+            preds_multi = scaler.inverse_transform(np.array(preds_multi).reshape(-1, 1)).flatten()
+            fechas_futuras = pd.date_range(start=df_rnn.index[-1] + timedelta(hours=1), periods=n_pred, freq='H')
 
-            fechas_futuras = pd.date_range(start=df_prediccion.index[-1] + pd.Timedelta(hours=1), periods=n_pred,
-                                           freq='H')
-
-            fig_multi = go.Figure()
-            fig_multi.add_trace(
-                go.Scatter(x=df_prediccion.index, y=df_prediccion['value'], mode='lines', name='Datos reales'))
-            fig_multi.add_trace(
-                go.Scatter(x=fechas_futuras, y=predicciones_multi, mode='lines+markers', name='Predicción Multi-Step'))
-
-            fig_multi.update_layout(title="Predicción Multi-Step", xaxis_title="Fecha", yaxis_title="Valor")
-            st.plotly_chart(fig_multi, use_container_width=True)
-
-        except Exception as e:
-            st.warning(f"❌ El modelo {model_type} con pérdida {loss_function} no se encuentra o ocurrió un error.\n{e}")
+            with st.expander("Ver gráfico Multi-Step"):
+                fig_multi = go.Figure()
+                fig_multi.add_trace(go.Scatter(x=df_rnn.index[-72:], y=df_rnn['value'].tail(72), name="Real"))
+                fig_multi.add_trace(go.Scatter(x=fechas_futuras, y=preds_multi, name="Predicción"))
+                fig_multi.update_layout(title="Predicción futura de demanda", xaxis_title="Fecha", yaxis_title="MW")
+                st.plotly_chart(fig_multi, use_container_width=True)
 
     with tab5:
         st.subheader("Predicciones de series temporales con Facebook Prophet")
 
-        # Configuración de granularidades
         granularidades = {
             'Diaria': 'diaria',
             'Semanal': 'semanal',
@@ -935,57 +947,40 @@ def main():
             'Anual': 'anual'
         }
 
-        # Configuración de pasos precalculados
-        horizontes = [10, 50, 100]
-
-        # Selección de granularidad y horizonte
-        granularidad_seleccionada = st.selectbox("Selecciona la granularidad:", list(granularidades.keys()))
+        granularidad_seleccionada = st.selectbox("Selecciona la granularidad Prophet:", list(granularidades.keys()))
         nombre_granularidad = granularidades[granularidad_seleccionada]
+        calcular_prophet = st.button("Calcular predicción Prophet")
 
-        n_pred = st.selectbox("Selecciona el número de pasos a predecir:", horizontes)
+        if calcular_prophet:
+            try:
+                model_prophet = cargar_modelo_prophet(nombre_granularidad)
+                df_prophet = cargar_datos_prophet()
+                st.success(f"✅ Modelo Prophet '{granularidad_seleccionada}' cargado correctamente.")
+            except Exception as e:
+                st.error(f"Error cargando Prophet {nombre_granularidad}: {e}")
+                st.stop()
 
-        # Cachear la carga de modelos
-        @st.cache_resource
-        def load_model(granularidad):
-            return joblib.load(f'models/prophet_model_{granularidad}.joblib')
+            freq_map = {
+                'diaria': 'D',
+                'semanal': 'W',
+                'mensual': 'M',
+                'trimestral': 'Q',
+                'semestral': '2Q',
+                'anual': 'A'
+            }
+            freq = freq_map[nombre_granularidad]
+            n_pred = st.slider("Pasos a predecir (Prophet)", min_value=10, max_value=100, value=10)
 
-        # Cachear la carga de predicciones
-        @st.cache_data
-        def load_forecast(granularidad, pasos):
-            df = pd.read_csv(f'forecasts/forecast_{granularidad}_{pasos}.csv')
-            df['ds'] = pd.to_datetime(df['ds'])
-            return df
+            future = model_prophet.make_future_dataframe(periods=n_pred, freq=freq)
+            forecast = model_prophet.predict(future)
 
-        # Cargar modelo
-        try:
-            model_prophet = load_model(nombre_granularidad)
-            st.success(f"Modelo {granularidad_seleccionada} cargado correctamente.")
-        except Exception as e:
-            st.error(f"No se pudo cargar el modelo para {granularidad_seleccionada}: {e}")
-            st.stop()
+            with st.expander("Ver predicción Prophet"):
+                fig1 = plot_plotly(model_prophet, forecast)
+                st.plotly_chart(fig1, use_container_width=True)
 
-        # Cargar predicción precalculada
-        try:
-            forecast = load_forecast(nombre_granularidad, n_pred)
-            st.success("Predicción cargada correctamente.")
-        except Exception as e:
-            st.error(f"No se pudo cargar la predicción: {e}")
-            st.stop()
-
-        # Mostrar gráfica de predicción
-        st.subheader("Predicción")
-        fig1 = plot_plotly(model_prophet, forecast)
-
-        # 🔥 Limitar la vista a los últimos 6 meses
-        min_date = forecast['ds'].max() - pd.DateOffset(months=6)
-        fig1.update_layout(xaxis_range=[min_date, forecast['ds'].max()])
-
-        st.plotly_chart(fig1, use_container_width=True)
-
-        # Mostrar componentes
-        st.subheader("Componentes de la predicción")
-        fig2 = plot_components_plotly(model_prophet, forecast)
-        st.plotly_chart(fig2, use_container_width=True)
+            with st.expander("Ver componentes Prophet"):
+                fig2 = plot_components_plotly(model_prophet, forecast)
+                st.plotly_chart(fig2, use_container_width=True)
 
     with tab6:
         st.subheader("Gráficos extras de interés")
